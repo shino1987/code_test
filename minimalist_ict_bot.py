@@ -94,7 +94,8 @@ def init_exchange():
     print("Initializing Binance (CCXT)...")
     
     # Check for testnet environment variable
-    use_testnet = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
+    testnet_val = os.getenv("BINANCE_TESTNET", "false").lower()
+    use_testnet = testnet_val in ("true", "1", "yes", "on")
     
     config = {
         "apiKey": os.getenv("BINANCE_API_KEY", ""),
@@ -300,6 +301,11 @@ def detect_displacement(df: pd.DataFrame, side: str):
     for i in range(len(df) - 5, len(df)):
         row = df.iloc[i]
         candle_range = row["high"] - row["low"]
+        
+        # Prevent division by zero
+        if candle_range == 0:
+            continue
+        
         body = abs(row["close"] - row["open"])
         
         # Strong candle: range > threshold and body ratio
@@ -549,7 +555,7 @@ def manage_position(symbol: str, df: pd.DataFrame):
             return
         
         # Check TP1 (move SL to BE)
-        if high >= tp1 and pos.get("be_moved") != True:
+        if high >= tp1 and not pos.get("be_moved"):
             pos["sl"] = pos["entry"]  # Move SL to break-even
             pos["be_moved"] = True
             msg = f"🟡 TP1_BE {symbol}\nTP1 hit, SL moved to BE: {pos['entry']:.6f}"
@@ -568,7 +574,7 @@ def manage_position(symbol: str, df: pd.DataFrame):
             return
         
         # Check TP1 (move SL to BE)
-        if low <= tp1 and pos.get("be_moved") != True:
+        if low <= tp1 and not pos.get("be_moved"):
             pos["sl"] = pos["entry"]
             pos["be_moved"] = True
             msg = f"🟡 TP1_BE {symbol}\nTP1 hit, SL moved to BE: {pos['entry']:.6f}"
