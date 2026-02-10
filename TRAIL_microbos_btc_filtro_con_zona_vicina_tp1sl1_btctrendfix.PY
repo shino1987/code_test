@@ -33,7 +33,7 @@ from decimal import Decimal, ROUND_DOWN, getcontext
 getcontext().prec = 28
 
 # ===================== CONFIG =====================
-# TIMEFRAME: Usiamo 3 timeframe diversi per scopi diversi
+# TIMEFRAMES: Usiamo 3 timeframe diversi per scopi diversi
 # - BIAS_TF (30m): determina la direzione generale del mercato (LONG/SHORT)
 # - ENTRY_TF (5m): trova il punto di ingresso preciso nel trade
 # - SL_TF (15m): calcola lo Stop Loss strutturale (più robusto del 5m)
