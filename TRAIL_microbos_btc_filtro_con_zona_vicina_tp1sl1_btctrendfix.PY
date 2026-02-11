@@ -130,6 +130,10 @@ FVG_MIN_SIZE_PCT = 0.00010
 # Buffer strutturale SL (piccolo margine oltre swing/OB)
 STRUCT_SL_BUFFER_PCT = 0.00020  # 0.02%
 
+# SL/TP configuration
+SL_BUFFER_M15_ATR_MULT = 0.05    # 5% ATR buffer for structural SL
+TP_R_MULTIPLE = 2.0               # Take Profit at 2R
+
 pending = {}
 positions = {}
 
@@ -1133,6 +1137,50 @@ def place_close_market(symbol: str, side: str, amount: float):
     params["side"] = "SELL" if side == "LONG" else "BUY"
     return ex.sapiPostMarginOrder(params)
 
+# ===================== SL/TP CALCULATION =====================
+def calculate_sl_tp(side: str, entry_price: float, 
+                    sweep_extreme: float, retrace_point: float,
+                    atr_m15: float) -> dict:
+    """
+    Calculate structural Stop Loss and Take Profit (2R)
+    
+    SL Logic (Structural M15):
+    - LONG: SL = min(sweep_extreme, retrace_point) - ATR_M15 * 0.05
+    - SHORT: SL = max(sweep_extreme, retrace_point) + ATR_M15 * 0.05
+    
+    TP Logic (2R Fixed):
+    - R = |entry - SL|
+    - LONG: TP = entry + 2 * R
+    - SHORT: TP = entry - 2 * R
+    
+    Returns dict with SL, TP, R
+    """
+    if side == "LONG":
+        # Structural SL below sweep and retrace
+        sl = min(sweep_extreme, retrace_point) - atr_m15 * SL_BUFFER_M15_ATR_MULT
+    else:  # SHORT
+        # Structural SL above sweep and retrace
+        sl = max(sweep_extreme, retrace_point) + atr_m15 * SL_BUFFER_M15_ATR_MULT
+    
+    # Calculate R (risk)
+    r = abs(entry_price - sl)
+    
+    # Calculate TP (2R)
+    if side == "LONG":
+        tp = entry_price + TP_R_MULTIPLE * r
+    else:  # SHORT
+        tp = entry_price - TP_R_MULTIPLE * r
+    
+    # Calculate R ratio
+    r_ratio = TP_R_MULTIPLE  # Always 2.0 for 2R
+    
+    return {
+        "sl": sl,
+        "tp": tp,
+        "r": r,
+        "r_ratio": r_ratio,
+    }
+
 # ===================== OPEN/CLOSE =====================
 def open_position(symbol, side, entry_ref, sl_price, sl_type, tp_price, note=""):
     if len(positions) >= MAX_OPEN_POS:
@@ -1329,12 +1377,14 @@ while True:
                         sw = pools_5m["swing_low"]
                         if (last["l"] < (sw - buffer)) and (last["c"] > sw):
                             p["state"] = "WAIT_DISPLACEMENT"
+                            p["sweep_extreme"] = last["l"]  # Store the low that swept
                         else:
                             reasons["no_sweep"] += 1
                     else:
                         sw = pools_5m["swing_high"]
                         if (last["h"] > (sw + buffer)) and (last["c"] < sw):
                             p["state"] = "WAIT_DISPLACEMENT"
+                            p["sweep_extreme"] = last["h"]  # Store the high that swept
                         else:
                             reasons["no_sweep"] += 1
 
@@ -1381,6 +1431,11 @@ while True:
 
                     p["state"] = "WAIT_CONFIRM"
                     p["touch_name"], p["touch_zone"] = touched
+                    # Store retrace point (the price that touched the zone)
+                    if side == "LONG":
+                        p["retrace_point"] = last["l"]  # Low that touched the zone
+                    else:
+                        p["retrace_point"] = last["h"]  # High that touched the zone
 
                 # WAIT_CONFIRM
                 elif p["state"] == "WAIT_CONFIRM":
@@ -1426,21 +1481,62 @@ while True:
                                     pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
                                     continue
 
-
-                            # TP iniziale = TP0 (da TP_LADDER_PCTS[0])
-                            tp0_pct = TP_LADDER_PCTS[0]
-                            tp = entry * (1.0 + tp0_pct)
-                            if not has_room_to_tp(entry, "LONG", tp0_pct, df_sl):
-
+                            # Get sweep extreme and retrace point
+                            sweep_extreme = p.get("sweep_extreme")
+                            retrace_point = p.get("retrace_point")
+                            
+                            if sweep_extreme is None or retrace_point is None:
+                                if DEBUG_TERMINAL:
+                                    print(f"[{symbol}] MISSING sweep_extreme or retrace_point → RESET", flush=True)
+                                pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                                reasons["missing_sweep_retrace"] += 1
+                                continue
+                            
+                            # Calculate ATR from M15
+                            atr_series = atr(df_sl, 14)
+                            atr_m15 = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
+                            
+                            if atr_m15 <= 0:
+                                if DEBUG_TERMINAL:
+                                    print(f"[{symbol}] Invalid ATR M15 → RESET", flush=True)
+                                pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                                reasons["invalid_atr"] += 1
+                                continue
+                            
+                            # Calculate SL/TP using structural method
+                            sl_tp = calculate_sl_tp(
+                                side="LONG",
+                                entry_price=entry,
+                                sweep_extreme=sweep_extreme,
+                                retrace_point=retrace_point,
+                                atr_m15=atr_m15,
+                            )
+                            
+                            sl = sl_tp["sl"]
+                            tp = sl_tp["tp"]
+                            r = sl_tp["r"]
+                            
+                            # Debug logging
+                            if DEBUG_TERMINAL:
+                                sl_pct = abs(entry - sl) / entry * 100
+                                tp_pct = abs(tp - entry) / entry * 100
+                                print(
+                                    f"[{symbol}] SL/TP CALCULATED: "
+                                    f"SL={sl:.6f} ({sl_pct:.2f}%) | "
+                                    f"TP={tp:.6f} ({tp_pct:.2f}%, 2R) | "
+                                    f"R={r:.6f}",
+                                    flush=True
+                                )
+                            
+                            # Check if there's room to reach TP
+                            tp_pct_check = abs(tp - entry) / entry
+                            if not has_room_to_tp(entry, "LONG", tp_pct_check, df_sl):
                                 reasons["no_room_to_tp"] += 1
                                 pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
                                 continue
 
-                            # SL su ultimo OB 15m + CAP 0.65%
-                            sl = entry * (1.0 - SL_FIXED_PCT)
-                            sl_type = "FIXED_1%"
-
-                            note = f"ICT LONG | {p.get('touch_name')} confirm | TP0={tp0_pct*100:.2f}% | SL FIXED 1.00%"
+                            sl_type = "STRUCT_2R"
+                            note = f"ICT LONG | {p.get('touch_name')} confirm | TP 2R | SL STRUCTURAL"
                             open_position(symbol, "LONG", entry, sl, sl_type, tp, note)
                             del pending[symbol]
                         else:
@@ -1473,20 +1569,62 @@ while True:
                                     pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
                                     continue
 
-
-                            tp0_pct = TP_LADDER_PCTS[0]
-                            tp = entry * (1.0 - tp0_pct)
-                            if not has_room_to_tp(entry, "SHORT", tp0_pct, df_sl):
-
-
+                            # Get sweep extreme and retrace point
+                            sweep_extreme = p.get("sweep_extreme")
+                            retrace_point = p.get("retrace_point")
+                            
+                            if sweep_extreme is None or retrace_point is None:
+                                if DEBUG_TERMINAL:
+                                    print(f"[{symbol}] MISSING sweep_extreme or retrace_point → RESET", flush=True)
+                                pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                                reasons["missing_sweep_retrace"] += 1
+                                continue
+                            
+                            # Calculate ATR from M15
+                            atr_series = atr(df_sl, 14)
+                            atr_m15 = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
+                            
+                            if atr_m15 <= 0:
+                                if DEBUG_TERMINAL:
+                                    print(f"[{symbol}] Invalid ATR M15 → RESET", flush=True)
+                                pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                                reasons["invalid_atr"] += 1
+                                continue
+                            
+                            # Calculate SL/TP using structural method
+                            sl_tp = calculate_sl_tp(
+                                side="SHORT",
+                                entry_price=entry,
+                                sweep_extreme=sweep_extreme,
+                                retrace_point=retrace_point,
+                                atr_m15=atr_m15,
+                            )
+                            
+                            sl = sl_tp["sl"]
+                            tp = sl_tp["tp"]
+                            r = sl_tp["r"]
+                            
+                            # Debug logging
+                            if DEBUG_TERMINAL:
+                                sl_pct = abs(entry - sl) / entry * 100
+                                tp_pct = abs(tp - entry) / entry * 100
+                                print(
+                                    f"[{symbol}] SL/TP CALCULATED: "
+                                    f"SL={sl:.6f} ({sl_pct:.2f}%) | "
+                                    f"TP={tp:.6f} ({tp_pct:.2f}%, 2R) | "
+                                    f"R={r:.6f}",
+                                    flush=True
+                                )
+                            
+                            # Check if there's room to reach TP
+                            tp_pct_check = abs(tp - entry) / entry
+                            if not has_room_to_tp(entry, "SHORT", tp_pct_check, df_sl):
                                 reasons["no_room_to_tp"] += 1
                                 pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
                                 continue
 
-                            sl = entry * (1.0 + SL_FIXED_PCT)
-                            sl_type = "FIXED_1%"
-
-                            note = f"ICT SHORT | {p.get('touch_name')} confirm | TP0={tp0_pct*100:.2f}% | SL FIXED 1.00%"
+                            sl_type = "STRUCT_2R"
+                            note = f"ICT SHORT | {p.get('touch_name')} confirm | TP 2R | SL STRUCTURAL"
 
                             open_position(symbol, "SHORT", entry, sl, sl_type, tp, note)
                             del pending[symbol]
