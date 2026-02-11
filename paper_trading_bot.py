@@ -346,6 +346,8 @@ class PaperAccount:
     
     def get_statistics(self) -> Dict:
         """Calcola statistiche performance"""
+        roi = ((self.equity - self.initial_capital) / self.initial_capital * 100)
+        
         if not self.closed_trades:
             return {
                 "total_trades": 0,
@@ -353,7 +355,8 @@ class PaperAccount:
                 "losing_trades": 0,
                 "win_rate": 0.0,
                 "total_pnl": 0.0,
-                "avg_pnl": 0.0
+                "avg_pnl": 0.0,
+                "roi": roi
             }
         
         total_trades = len(self.closed_trades)
@@ -368,7 +371,7 @@ class PaperAccount:
             "win_rate": (winning_trades / total_trades * 100) if total_trades > 0 else 0.0,
             "total_pnl": total_pnl,
             "avg_pnl": total_pnl / total_trades if total_trades > 0 else 0.0,
-            "roi": ((self.equity - self.initial_capital) / self.initial_capital * 100)
+            "roi": roi
         }
     
     def get_advanced_statistics(self) -> Dict:
@@ -992,6 +995,8 @@ def detect_sweep(bias: str, pool_high: float, pool_low: float,
     # Filter 1: Wick Dominance
     # Lo sweep deve avere un wick significativo (stop run vero)
     body = abs(c - o)
+    if body == 0:
+        return None
     
     if direction == "DOWN":
         # Sell-side: wick_down >= body * wick_ratio
@@ -1614,7 +1619,7 @@ def main():
                     
                     # 2. DETECT SWEEP su HTF (STEP 2)
                     sweep_detected = None
-                    if bias != "NONE" and pool_high and pool_low:
+                    if bias != "NONE" and pool_high is not None and pool_low is not None:
                         # Calcola ATR su HTF
                         atr_htf = calculate_atr(df_htf, CONFIG["ATR_PERIOD"])
                         current_atr = float(atr_htf.iloc[-1]) if not pd.isna(atr_htf.iloc[-1]) else 0
@@ -1642,7 +1647,7 @@ def main():
                     
                     # 3. DETECT DISPLACEMENT su HTF (STEP 3)
                     displacement_detected = None
-                    if sweep_detected and bias != "NONE" and pool_high and pool_low:
+                    if sweep_detected and bias != "NONE" and pool_high is not None and pool_low is not None:
                         # Dopo sweep, cerchiamo displacement nelle barre successive
                         # Per semplicità, controlliamo l'ultima candela
                         # (in futuro: loop sulle ultime N barre dopo sweep)
@@ -1916,7 +1921,7 @@ def main():
                 print(f"  Trades totali: {stats['total_trades']}")
                 print(f"  Win Rate: {stats['win_rate']:.2f}%")
                 print(f"  PnL totale: ${stats['total_pnl']:,.2f}")
-                print(f"  ROI: {stats['roi']:+.2f}%")
+                print(f"  ROI: {stats.get('roi', 0.0):+.2f}%")
             
             print(f"{'='*70}")
             
@@ -1933,7 +1938,7 @@ def main():
         print(f"Capitale iniziale: ${account.initial_capital:,.2f}")
         print(f"Capitale finale: ${account.get_equity():,.2f}")
         print(f"PnL totale: ${stats['total_pnl']:,.2f}")
-        print(f"ROI: {stats['roi']:+.2f}%")
+        print(f"ROI: {stats.get('roi', 0.0):+.2f}%")
         print(f"Trades totali: {stats['total_trades']}")
         print(f"Win Rate: {stats['win_rate']:.2f}%")
         print(f"{'='*70}")
