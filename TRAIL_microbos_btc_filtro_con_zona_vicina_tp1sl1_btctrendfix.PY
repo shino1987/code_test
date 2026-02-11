@@ -116,7 +116,7 @@ MIN_NOTIONAL_PAD = 1.05
 SWING_LR_BIAS = 2
 SWING_LR_ENTRY = 2
 SWING_LR_SL = 2
-SWING_LR = 2             # Default swing LR for M5
+SWING_LR_M5 = 2          # Swing LR for M5/LTF confirmation
 
 # Sweep
 SWEEP_BUFFER_PCT = 0.00025
@@ -762,7 +762,15 @@ def detect_confirm_m5(disp_dir: str, zone_low: float, zone_high: float,
     - Body dominance (body >= 50% range)
     - Optional: mini FVG M5 = grade A, else grade B
     
-    Returns dict with status and confirm info
+    Returns:
+        dict: Confirmation result with structure:
+            - status (str): "CONFIRMED", "WAIT", or "EXPIRED"
+            - dir (str): "UP" or "DOWN" (only if CONFIRMED)
+            - micro_bos_level (float): BOS level (only if CONFIRMED)
+            - impulse_ok (bool): Impulse check result (only if CONFIRMED)
+            - body_ok (bool): Body dominance check result (only if CONFIRMED)
+            - fvg (dict or None): FVG info with 'dir', 'low', 'high' (only if CONFIRMED)
+            - grade (str): "A" or "B" (only if CONFIRMED)
     """
     # Time decay check
     if bars_since_retrace_hit > MAX_CONFIRM_BARS:
@@ -1512,7 +1520,7 @@ while True:
                     df_ltf_closed = df_ltf.iloc[:-1].copy()
 
                     # Get M5 swings for micro structure
-                    sh_m5, sl_m5 = find_swings(df_ltf_closed, lr=SWING_LR)
+                    sh_m5, sl_m5 = find_swings(df_ltf_closed, lr=SWING_LR_M5)
 
                     if len(sh_m5) < 1 or len(sl_m5) < 1:
                         reasons["no_swings_ltf"] += 1
@@ -1522,7 +1530,15 @@ while True:
                     m5_last_swing_low = float(sl_m5[-1][1])
 
                     # Update bars since retrace hit
-                    p["bars_since_retrace_hit"] = len(df_ltf_closed) - 1 - p.get("retrace_hit_bar_index", 0)
+                    retrace_hit_bar_index = p.get("retrace_hit_bar_index")
+                    if retrace_hit_bar_index is None:
+                        # Corrupted state - missing retrace_hit_bar_index
+                        if DEBUG_TERMINAL:
+                            print(f"[{symbol}] Missing retrace_hit_bar_index, reset to WAIT_SWEEP", flush=True)
+                        pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                        continue
+                    
+                    p["bars_since_retrace_hit"] = len(df_ltf_closed) - 1 - retrace_hit_bar_index
 
                     # Get current M5 candle
                     last_m5 = candle_stats(df_ltf.iloc[-1])
@@ -1570,7 +1586,10 @@ while True:
                         p["state"] = "VALID_SETUP"
                         p["confirm"] = confirm
                         if DEBUG_TERMINAL:
-                            fvg_info = f"miniFVG {confirm['fvg']['dir']} [{confirm['fvg']['low']:.6f}-{confirm['fvg']['high']:.6f}]" if confirm.get('fvg') else "NO miniFVG"
+                            fvg_info = "NO miniFVG"
+                            fvg = confirm.get('fvg')
+                            if fvg and isinstance(fvg, dict) and 'dir' in fvg and 'low' in fvg and 'high' in fvg:
+                                fvg_info = f"miniFVG {fvg['dir']} [{fvg['low']:.6f}-{fvg['high']:.6f}]"
                             print(
                                 f"[{symbol}] CONFIRM DETECTED! "
                                 f"dir={confirm['dir']} grade={confirm['grade']} "
