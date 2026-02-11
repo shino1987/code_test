@@ -24,11 +24,27 @@ from collections import defaultdict
 # ===================== CONFIGURAZIONE =====================
 CONFIG = {
     # Capitale iniziale
-    "INITIAL_CAPITAL": 10000.0,  # $10,000 USDT simulati
+    "INITIAL_CAPITAL": 10000.0,  # $10,000 USDC simulati
     
     # Exchange e Mercati
     "EXCHANGE": "binance",
-    "SYMBOLS": ["BTC/USDT", "ETH/USDT"],  # Mercati da monitorare
+    "SYMBOLS": ["BTC/USDC", "ETH/USDC", "BNB/USDC"],  # Coppie USDC alta liquidità
+    
+    # API Keys (per LIVE mode)
+    "API_KEY": "",  # Inserire API key Binance per live trading
+    "API_SECRET": "",  # Inserire API secret Binance per live trading
+    
+    # Trading Mode
+    "MODE": "PAPER",  # "PAPER" (simulazione) o "LIVE" (real trading)
+    "LIVE_TRADING_ENABLED": False,  # Flag sicurezza per live trading
+    "REQUIRE_CONFIRMATION": True,  # Richiedi conferma prima di ogni trade in LIVE
+    
+    # Margin Trading Settings
+    "MARGIN_TYPE": "cross",  # "cross" o "isolated"
+    "MAX_LEVERAGE": 3.0,  # Leverage massimo (3x = conservativo)
+    "MIN_MARGIN_LEVEL": 1.5,  # Margin level minimo (1.5 = 150% collateral)
+    "LIQUIDATION_BUFFER_PCT": 0.10,  # Buffer % per alert liquidazione
+    "DAILY_INTEREST_RATE": 0.0002,  # ~0.02% daily interest (varia per coin)
     
     # Timeframes ICT
     "HTF": "15m",  # Higher TimeFrame per BIAS
