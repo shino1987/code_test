@@ -79,7 +79,15 @@ Conferma setup su M5 dopo retrace:
 - **Status**: CONFIRMED, WAIT, EXPIRED
 - **Output**: dir, micro_bos_level, fvg, grade
 
-**Entry finale**: Richiede tutti i 5 STEP coerenti (BIAS → SWEEP → DISPLACEMENT → RETRACE → CONFIRM)
+### Entry Logic ✅
+Calcolo entry price dopo confirmation:
+- **Entry al 50% della candela confirm**:
+  - LONG: `entry_price = confirm_low + (confirm_range × 0.50)`
+  - SHORT: `entry_price = confirm_high - (confirm_range × 0.50)`
+- **Timeout**: Max 6 barre M5 dopo confirmation
+- **Output**: side, entry_price
+
+**Entry finale**: Richiede tutti i 5 STEP coerenti + Entry Logic Ready
 
 ## 🚀 Utilizzo
 
@@ -146,6 +154,12 @@ CONFIG = {
 "CONFIRM_BODY_RATIO": 0.50,         # Body dominance >= 50%
 ```
 
+### Parametri Entry Logic
+```python
+"MAX_ENTRY_BARS": 6,                # Max barre M5 per entry dopo confirm
+"ENTRY_RETRACE_PCT": 0.50,          # Entry al 50% della candela confirm
+```
+
 ## 📈 Output
 
 Il bot stampa in tempo reale:
@@ -154,6 +168,7 @@ Il bot stampa in tempo reale:
 - **DISPLACEMENT Detection**: Cambio regime con grade A/B
 - **RETRACE Detection**: Pullback a zona valore con depth e grade
 - **CONFIRMATION Detection**: Micro BOS su M5 con grade
+- **ENTRY LOGIC**: Entry price al 50% della candela confirm
 - **Posizioni**: Apertura/chiusura trades (solo con setup completo)
 - **Performance**: Win rate, ROI, PnL
 
@@ -210,6 +225,7 @@ Per trading reale, consulta sempre un professionista e comprendi i rischi del tr
 
 ## 📝 Versioni
 
+- **v5.1** - Entry Logic: Entry al 50% della candela confirm implementato
 - **v5.0** - STEP 5: Confirmation Detection implementato - **STRATEGIA ICT COMPLETA** 🎉
 - **v4.0** - STEP 4: Retrace Detection implementato
 - **v3.0** - STEP 3: Displacement Detection implementato
@@ -223,4 +239,4 @@ Sviluppato step-by-step seguendo la metodologia ICT.
 
 ---
 
-**Status**: ✅ **STRATEGIA ICT COMPLETA - Tutti i 5 STEP implementati!** 🎉🚀
+**Status**: ✅ **STRATEGIA ICT COMPLETA + ENTRY LOGIC - Pronto per il trading!** 🎉🚀

@@ -68,6 +68,10 @@ CONFIG = {
     "CONFIRM_IMPULSE_MULT": 0.60,       # Impulso M5 = range >= ATR M5 * 0.60
     "CONFIRM_BODY_RATIO": 0.50,         # Body dominance M5 >= 50%
     
+    # Entry Logic (Final Step)
+    "MAX_ENTRY_BARS": 6,                # Max barre M5 per entry dopo confirm
+    "ENTRY_RETRACE_PCT": 0.50,          # Entry al 50% della candela confirm
+    
     # Risk Management
     "RISK_PER_TRADE": 0.02,  # 2% del capitale per trade
     "STOP_LOSS_PCT": 0.015,  # Stop Loss al 1.5%
@@ -936,6 +940,57 @@ def detect_confirm_m5(disp_dir: str, zone_low: float, zone_high: float,
     }
 
 
+# ===================== ENTRY LOGIC (FINAL STEP) =====================
+def generate_entry(disp_dir: str, confirm_high: float, confirm_low: float,
+                   bars_since_confirm: int) -> Dict:
+    """
+    Genera entry logic dopo confirmation
+    
+    Parametri:
+    - disp_dir: "UP" o "DOWN" (direzione displacement/confirm)
+    - confirm_high: high della candela di confirmation
+    - confirm_low: low della candela di confirmation
+    - bars_since_confirm: barre M5 da confirmation
+    
+    Ritorna: Dict con status e entry price
+    
+    LOGICA ENTRY:
+    - LONG: entry al 50% della candela confirm (dal low)
+    - SHORT: entry al 50% della candela confirm (dal high)
+    - Timeout: max 6 barre M5
+    """
+    
+    # === TIMEOUT CHECK ===
+    max_entry_bars = CONFIG["MAX_ENTRY_BARS"]
+    if bars_since_confirm > max_entry_bars:
+        return {"status": "EXPIRED"}
+    
+    # === CALCOLO ENTRY PRICE ===
+    confirm_range = confirm_high - confirm_low
+    retrace_pct = CONFIG["ENTRY_RETRACE_PCT"]
+    
+    if disp_dir == "UP":
+        # LONG: entry al 50% dal low della candela confirm
+        entry_price = confirm_low + (confirm_range * retrace_pct)
+        side = "LONG"
+    elif disp_dir == "DOWN":
+        # SHORT: entry al 50% dal high della candela confirm
+        entry_price = confirm_high - (confirm_range * retrace_pct)
+        side = "SHORT"
+    else:
+        return {"status": "INVALID", "reason": "Direzione invalida"}
+    
+    # === ENTRY READY ===
+    return {
+        "status": "READY",
+        "side": side,
+        "entry_price": entry_price,
+        "confirm_high": confirm_high,
+        "confirm_low": confirm_low,
+        "confirm_range": confirm_range
+    }
+
+
 def check_entry_signal(bias: str, df_ltf: pd.DataFrame) -> Optional[str]:
     """
     Controlla segnale di entrata su LTF basato su BIAS HTF
@@ -1208,16 +1263,51 @@ def main():
                     else:
                         # Controlla entry (solo se sotto il limite di posizioni)
                         if len(account.positions) < CONFIG["MAX_POSITIONS"]:
-                            # Entry basato su tutti i 5 STEP ICT
+                            # Entry basato su tutti i 5 STEP ICT + Entry Logic
                             signal = None
+                            entry_data = None
+                            
                             if sweep_detected and displacement_detected and retrace_detected and confirm_detected:
                                 # Setup completo: BIAS + SWEEP + DISPLACEMENT + RETRACE + CONFIRM
                                 if bias == "UP" and displacement_detected['dir'] == "UP" and confirm_detected['dir'] == "UP":
-                                    signal = "LONG"
+                                    # Genera entry logic per LONG
+                                    # Prendi high/low della candela di confirmation (ultima candela M5)
+                                    confirm_candle = df_ltf.iloc[-1]
+                                    confirm_h = float(confirm_candle["high"])
+                                    confirm_l = float(confirm_candle["low"])
+                                    
+                                    # Simula bars_since_confirm (in produzione: tracked)
+                                    bars_since_confirm = 0
+                                    
+                                    entry_data = generate_entry(
+                                        displacement_detected['dir'],
+                                        confirm_h,
+                                        confirm_l,
+                                        bars_since_confirm
+                                    )
+                                    
+                                    if entry_data['status'] == "READY":
+                                        signal = "LONG"
+                                    
                                 elif bias == "DOWN" and displacement_detected['dir'] == "DOWN" and confirm_detected['dir'] == "DOWN":
-                                    signal = "SHORT"
+                                    # Genera entry logic per SHORT
+                                    confirm_candle = df_ltf.iloc[-1]
+                                    confirm_h = float(confirm_candle["high"])
+                                    confirm_l = float(confirm_candle["low"])
+                                    
+                                    bars_since_confirm = 0
+                                    
+                                    entry_data = generate_entry(
+                                        displacement_detected['dir'],
+                                        confirm_h,
+                                        confirm_l,
+                                        bars_since_confirm
+                                    )
+                                    
+                                    if entry_data['status'] == "READY":
+                                        signal = "SHORT"
                             
-                            if signal:
+                            if signal and entry_data:
                                 print(f"\n{'='*70}")
                                 print(f"🎯 [ENTRY SIGNAL] {signal} - COMPLETE ICT SETUP!")
                                 print(f"{'='*70}")
@@ -1226,23 +1316,29 @@ def main():
                                 print(f"  ✅ DISPLACEMENT: Grade {displacement_detected['grade']}")
                                 print(f"  ✅ RETRACE: Grade {retrace_detected['grade']}")
                                 print(f"  ✅ CONFIRMATION: Grade {confirm_detected['grade']}")
+                                print(f"  ✅ ENTRY PRICE: ${entry_data['entry_price']:,.2f}")
+                                print(f"     Confirm Range: ${entry_data['confirm_low']:,.2f} - ${entry_data['confirm_high']:,.2f}")
+                                print(f"     Entry @ 50% retrace of confirm candle")
                                 print(f"{'='*70}\n")
+                                
+                                # Usa entry_price per la posizione
+                                entry_price = entry_data['entry_price']
                                 
                                 # Calcola size basato sul risk management
                                 risk_amount = account.get_balance() * CONFIG["RISK_PER_TRADE"]
-                                position_size = risk_amount / current_price
+                                position_size = risk_amount / entry_price
                                 
-                                # Calcola SL e TP
+                                # Calcola SL e TP basati su entry_price
                                 if signal == "LONG":
-                                    stop_loss = current_price * (1 - CONFIG["STOP_LOSS_PCT"])
-                                    take_profit = current_price * (1 + CONFIG["TAKE_PROFIT_PCT"])
+                                    stop_loss = entry_price * (1 - CONFIG["STOP_LOSS_PCT"])
+                                    take_profit = entry_price * (1 + CONFIG["TAKE_PROFIT_PCT"])
                                 else:  # SHORT
-                                    stop_loss = current_price * (1 + CONFIG["STOP_LOSS_PCT"])
-                                    take_profit = current_price * (1 - CONFIG["TAKE_PROFIT_PCT"])
+                                    stop_loss = entry_price * (1 + CONFIG["STOP_LOSS_PCT"])
+                                    take_profit = entry_price * (1 - CONFIG["TAKE_PROFIT_PCT"])
                                 
                                 # Apri posizione
                                 account.open_position(
-                                    symbol, signal, current_price,
+                                    symbol, signal, entry_price,
                                     position_size, stop_loss, take_profit
                                 )
                 
