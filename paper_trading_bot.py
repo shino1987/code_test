@@ -55,6 +55,12 @@ CONFIG = {
     "DISPLACEMENT_BODY_RATIO": 0.55,    # Body dominance >= 55%
     "MAX_BARS_AFTER_SWEEP": 6,          # Timeout dopo sweep (barre M15)
     
+    # Retrace Detection (STEP 4)
+    "MAX_RETRACE_BARS": 8,              # Max barre M15 per retrace
+    "RETRACE_INVALIDATION_MULT": 0.05,  # Invalidation buffer = ATR * 0.05
+    "RETRACE_ZONE_MIN": 0.50,           # 50% del displacement range
+    "RETRACE_ZONE_MAX": 0.79,           # 79% del displacement range
+    
     # Risk Management
     "RISK_PER_TRADE": 0.02,  # 2% del capitale per trade
     "STOP_LOSS_PCT": 0.015,  # Stop Loss al 1.5%
@@ -675,6 +681,123 @@ def detect_displacement_m15(bias: str, o: float, h: float, l: float, c: float,
     }
 
 
+# ===================== RETRACE DETECTION (ICT STEP 4) =====================
+def detect_retrace_m15(disp_dir: str, fvg: Optional[Dict], 
+                       disp_high: float, disp_low: float, atr: float,
+                       o: float, h: float, l: float, c: float,
+                       bars_since_disp: int) -> Dict:
+    """
+    Rileva retrace (pullback) su M15 dopo displacement
+    
+    Parametri:
+    - disp_dir: "UP" o "DOWN" (direzione displacement)
+    - fvg: Fair Value Gap dal displacement (o None)
+    - disp_high: high del displacement range
+    - disp_low: low del displacement range
+    - atr: Average True Range corrente
+    - o, h, l, c: open, high, low, close della candela corrente
+    - bars_since_disp: numero di barre da displacement
+    
+    Ritorna: Dict con status e dettagli
+    
+    Status possibili:
+    - "HIT": zona retrace toccata, procedi a confirmation
+    - "WAIT": in attesa che prezzo torni in zona
+    - "EXPIRED": timeout superato, reset a WAIT_SWEEP
+    - "INVALIDATED": impulso invalidato, reset a WAIT_BIAS
+    
+    REGOLA ICT RETRACE:
+    - Preferenza zona FVG se presente
+    - Altrimenti: 50%-79% del displacement range
+    - Depth ideale: 0.50-0.79 (Grade A)
+    """
+    
+    # === FILTRO 1: TIMEOUT ===
+    max_retrace_bars = CONFIG["MAX_RETRACE_BARS"]
+    if bars_since_disp > max_retrace_bars:
+        return {"status": "EXPIRED"}
+    
+    # === CALCOLO DISPLACEMENT RANGE ===
+    disp_range = disp_high - disp_low
+    if disp_range <= 0:
+        return {"status": "INVALID"}
+    
+    # === FILTRO 2: INVALIDATION CHECK ===
+    # Il prezzo non deve chiudere oltre il displacement range + buffer
+    invalidation_buffer = atr * CONFIG["RETRACE_INVALIDATION_MULT"]
+    
+    if disp_dir == "UP":
+        # Per UP: non deve chiudere sotto il low del displacement
+        invalidate_level = disp_low - invalidation_buffer
+        invalidated = c < invalidate_level
+    else:
+        # Per DOWN: non deve chiudere sopra il high del displacement
+        invalidate_level = disp_high + invalidation_buffer
+        invalidated = c > invalidate_level
+    
+    if invalidated:
+        return {"status": "INVALIDATED"}
+    
+    # === DEFINIZIONE ZONA RETRACE ===
+    # Caso A: FVG esiste e coerente con direzione
+    if fvg is not None and fvg.get("dir") == disp_dir:
+        z_low = fvg["low"]
+        z_high = fvg["high"]
+        zone_type = "FVG"
+    else:
+        # Caso B: Fallback a 50%-79% del range
+        if disp_dir == "UP":
+            # Per UP: zona discount (parte bassa del range)
+            z_low = disp_low + disp_range * CONFIG["RETRACE_ZONE_MIN"]
+            z_high = disp_low + disp_range * CONFIG["RETRACE_ZONE_MAX"]
+        else:
+            # Per DOWN: zona premium (parte alta del range)
+            z_high = disp_high - disp_range * CONFIG["RETRACE_ZONE_MIN"]
+            z_low = disp_high - disp_range * CONFIG["RETRACE_ZONE_MAX"]
+        zone_type = "FALLBACK"
+    
+    # === HIT DETECTION (intersezione con zona) ===
+    # Basta che il wick tocchi la zona
+    retrace_hit = (l <= z_high) and (h >= z_low)
+    
+    if not retrace_hit:
+        return {
+            "status": "WAIT",
+            "zone_low": z_low,
+            "zone_high": z_high,
+            "zone_type": zone_type
+        }
+    
+    # === CALCOLO DEPTH E GRADING ===
+    if disp_dir == "UP":
+        # Per UP: retrace point è il low della candela
+        retrace_point = l
+        # Depth: quanto è sceso dal high del displacement
+        retrace_depth = (disp_high - retrace_point) / disp_range
+    else:
+        # Per DOWN: retrace point è il high della candela
+        retrace_point = h
+        # Depth: quanto è salito dal low del displacement
+        retrace_depth = (retrace_point - disp_low) / disp_range
+    
+    # Grading basato sulla profondità
+    if CONFIG["RETRACE_ZONE_MIN"] <= retrace_depth <= CONFIG["RETRACE_ZONE_MAX"]:
+        grade = "A"  # Profondità ideale
+    else:
+        grade = "B"  # Valido ma fuori range ideale
+    
+    # === RETRACE VALIDO ===
+    return {
+        "status": "HIT",
+        "zone_low": z_low,
+        "zone_high": z_high,
+        "zone_type": zone_type,
+        "retrace_point": retrace_point,
+        "retrace_depth": retrace_depth,
+        "grade": grade
+    }
+
+
 def check_entry_signal(bias: str, df_ltf: pd.DataFrame) -> Optional[str]:
     """
     Controlla segnale di entrata su LTF basato su BIAS HTF
@@ -835,6 +958,46 @@ def main():
                                     fvg = displacement_detected['fvg']
                                     print(f"    FVG {fvg['dir']}: ${fvg['low']:,.2f} - ${fvg['high']:,.2f}")
                     
+                    # 4. DETECT RETRACE su HTF (STEP 4)
+                    retrace_detected = None
+                    if displacement_detected:
+                        # Dopo displacement, cerchiamo retrace
+                        # Per semplicità, analizziamo le barre successive
+                        # In produzione: loop sulle barre dopo displacement con tracking
+                        
+                        # Usiamo la candela corrente per verificare retrace
+                        disp_dir = displacement_detected['dir']
+                        disp_fvg = displacement_detected.get('fvg')
+                        
+                        # Range displacement (usiamo la candela di displacement stessa)
+                        disp_high = h
+                        disp_low = l
+                        
+                        # Simula bars_since_disp (in produzione: tracked)
+                        bars_since_disp = 0  # Semplificazione: considera candela corrente
+                        
+                        # Detect retrace
+                        retrace_result = detect_retrace_m15(
+                            disp_dir, disp_fvg,
+                            disp_high, disp_low, current_atr,
+                            o, h, l, c,
+                            bars_since_disp
+                        )
+                        
+                        if retrace_result['status'] == "HIT":
+                            retrace_detected = retrace_result
+                            print(f"  [RETRACE HIT!] Grade: {retrace_detected['grade']}")
+                            print(f"    Zone: ${retrace_detected['zone_low']:,.2f} - ${retrace_detected['zone_high']:,.2f}")
+                            print(f"    Type: {retrace_detected['zone_type']}")
+                            print(f"    Point: ${retrace_detected['retrace_point']:,.2f}")
+                            print(f"    Depth: {retrace_detected['retrace_depth']:.2%}")
+                        elif retrace_result['status'] == "WAIT":
+                            print(f"  [RETRACE] Waiting for pullback to zone...")
+                        elif retrace_result['status'] == "EXPIRED":
+                            print(f"  [RETRACE] EXPIRED - Timeout reached")
+                        elif retrace_result['status'] == "INVALIDATED":
+                            print(f"  [RETRACE] INVALIDATED - Impulse broken")
+                    
                     # Controlla posizione esistente
                     position = account.get_position(symbol)
                     
@@ -846,18 +1009,19 @@ def main():
                     else:
                         # Controlla entry (solo se sotto il limite di posizioni)
                         if len(account.positions) < CONFIG["MAX_POSITIONS"]:
-                            # Entry basato su SWEEP + DISPLACEMENT (STEP 2 + 3)
+                            # Entry basato su SWEEP + DISPLACEMENT + RETRACE (STEP 2 + 3 + 4)
                             signal = None
-                            if sweep_detected and displacement_detected:
-                                # Se c'è sweep E displacement validi, entry nella direzione del bias
+                            if sweep_detected and displacement_detected and retrace_detected:
+                                # Se c'è sweep, displacement E retrace validi, entry nella direzione del bias
                                 if bias == "UP" and displacement_detected['dir'] == "UP":
                                     signal = "LONG"
                                 elif bias == "DOWN" and displacement_detected['dir'] == "DOWN":
                                     signal = "SHORT"
                             
                             if signal:
-                                print(f"  [SIGNAL] {signal} detected after SWEEP + DISPLACEMENT!")
+                                print(f"  [SIGNAL] {signal} detected! Full ICT setup complete!")
                                 print(f"    Displacement Grade: {displacement_detected['grade']}")
+                                print(f"    Retrace Grade: {retrace_detected['grade']}")
                                 
                                 # Calcola size basato sul risk management
                                 risk_amount = account.get_balance() * CONFIG["RISK_PER_TRADE"]

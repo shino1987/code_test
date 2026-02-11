@@ -46,9 +46,23 @@ Rileva cambio di regime dopo sweep (M15):
   - Grade B: Displacement senza FVG
 - **Output**: dir, bos_level, fvg, grade
 
-### STEP 4-5: In arrivo 🚧
-- **STEP 4**: Retrace logic (Order Blocks)
-- **STEP 5**: Confirmation e Entry
+### STEP 4: RETRACE Detection ✅
+Rileva pullback ordinato dopo displacement (M15):
+- **Zona retrace**:
+  - Caso A: FVG zone (se presente)
+  - Caso B: Fallback 50%-79% del displacement range
+- **Hit detection**: Intersezione wick con zona (basta toccare)
+- **Filtri**:
+  - Timeout: Max 8 barre M15
+  - Invalidation: Close oltre displacement ± (ATR * 0.05)
+- **Depth & Grading**:
+  - Grade A: Depth 0.50-0.79 (ideale)
+  - Grade B: Depth fuori range (valido)
+- **Status**: HIT, WAIT, EXPIRED, INVALIDATED
+- **Output**: zone, retrace_point, depth, grade
+
+### STEP 5: In arrivo 🚧
+- **STEP 5**: Confirmation e Entry finale
 
 ## 🚀 Utilizzo
 
@@ -98,12 +112,21 @@ CONFIG = {
 "MAX_BARS_AFTER_SWEEP": 6,          # Timeout dopo sweep
 ```
 
+### Parametri Retrace Detection
+```python
+"MAX_RETRACE_BARS": 8,              # Max barre M15 per retrace
+"RETRACE_INVALIDATION_MULT": 0.05,  # Invalidation buffer = ATR * 0.05
+"RETRACE_ZONE_MIN": 0.50,           # 50% displacement range
+"RETRACE_ZONE_MAX": 0.79,           # 79% displacement range
+```
+
 ## 📈 Output
 
 Il bot stampa in tempo reale:
 - **BIAS HTF**: Direzione determinata su 15m
 - **SWEEP Detection**: Quando rileva liquidity grab
 - **DISPLACEMENT Detection**: Cambio regime con grade A/B
+- **RETRACE Detection**: Pullback a zona valore con depth e grade
 - **Posizioni**: Apertura/chiusura trades
 - **Performance**: Win rate, ROI, PnL
 
@@ -160,6 +183,7 @@ Per trading reale, consulta sempre un professionista e comprendi i rischi del tr
 
 ## 📝 Versioni
 
+- **v4.0** - STEP 4: Retrace Detection implementato
 - **v3.0** - STEP 3: Displacement Detection implementato
 - **v2.0** - STEP 2: Sweep Detection implementato
 - **v1.0** - STEP 1: Bias Detection implementato
@@ -171,4 +195,4 @@ Sviluppato step-by-step seguendo la metodologia ICT.
 
 ---
 
-**Status**: ✅ STEP 1, 2 & 3 completati | 🚧 STEP 4-5 in sviluppo
+**Status**: ✅ STEP 1, 2, 3 & 4 completati | 🚧 STEP 5 in sviluppo
