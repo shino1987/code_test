@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Minimalist ICT Paper Trading Bot
+Minimalist ICT Trading Bot
+- Supports LIVE TRADING on Cross Margin or Paper Trading
 - NO Telegram
-- Paper Trading ONLY
 - Zero Filters
 - CSV Tracking
 - Console Logging
+
+WARNING: When LIVE_TRADING=True, this bot will trade with REAL MONEY
+on Binance Cross Margin. Use at your own risk.
 """
 
 import os
@@ -40,8 +43,16 @@ DISP_BODY_RATIO = 0.6    # Body must be > 60% of range
 STRUCT_SL_BUFFER_PCT = 0.0005  # 0.05% buffer beyond swing
 MIN_SL_PCT = 0.003       # Minimum 0.3% SL
 
-# Paper Trading
-LIVE_TRADING = False     # MUST be False for paper trading
+# ===================== TRADING MODE =====================
+# WARNING: Set to True for LIVE TRADING with REAL MONEY on Cross Margin
+LIVE_TRADING = True      # True = Live Trading | False = Paper Trading
+
+# Live Trading Configuration (Cross Margin)
+TRADE_USDC_TARGET = 200.0  # USDC per trade (live trading)
+MAX_OPEN_POS = 3           # Maximum concurrent positions
+MIN_NOTIONAL_PAD = 1.05    # Padding for minimum notional
+
+# Paper Trading Configuration
 PAPER_POSITION_SIZE_USDC = 100.0  # Simulated position size in USDC
 
 # Symbols to trade
@@ -99,13 +110,38 @@ def log_trade_to_csv(trade_data: dict):
 # ===================== EXCHANGE SETUP =====================
 def init_exchange():
     """Initialize CCXT exchange"""
-    log("Initializing Binance exchange (paper trading mode)...")
-    
-    # For paper trading, we can use public data only (no API keys needed)
-    exchange = ccxt.binance({
-        'enableRateLimit': True,
-        'timeout': 30000,
-    })
+    if LIVE_TRADING:
+        log("⚠️  INITIALIZING BINANCE FOR LIVE TRADING (CROSS MARGIN) ⚠️")
+        log("WARNING: This will use REAL MONEY!")
+        
+        api_key = os.getenv("BINANCE_API_KEY")
+        api_secret = os.getenv("BINANCE_API_SECRET")
+        
+        if not api_key or not api_secret:
+            log("ERROR: BINANCE_API_KEY and BINANCE_API_SECRET environment variables required for live trading")
+            raise ValueError("Missing API credentials for live trading")
+        
+        log(f"API Key length: {len(api_key)}")
+        log(f"API Secret length: {len(api_secret)}")
+        
+        exchange = ccxt.binance({
+            'apiKey': api_key,
+            'secret': api_secret,
+            'enableRateLimit': True,
+            'timeout': 60000,
+            'options': {
+                'adjustForTimeDifference': True,
+                'recvWindow': 60000,
+                'fetchCurrencies': False,
+            }
+        })
+    else:
+        log("Initializing Binance exchange (paper trading mode)...")
+        # For paper trading, we can use public data only (no API keys needed)
+        exchange = ccxt.binance({
+            'enableRateLimit': True,
+            'timeout': 30000,
+        })
     
     try:
         exchange.load_markets()
@@ -130,6 +166,161 @@ def fetch_ohlcv(exchange, symbol: str, timeframe: str, limit: int) -> pd.DataFra
     except Exception as e:
         log(f"ERROR fetching {symbol} {timeframe}: {e}")
         return pd.DataFrame()
+
+# ===================== CROSS MARGIN ORDER EXECUTION =====================
+def to_binance_symbol(symbol: str) -> str:
+    """Convert CCXT symbol format to Binance format"""
+    return symbol.replace("/", "")
+
+def get_binance_filters(exchange, symbol: str):
+    """Get trading filters for symbol"""
+    try:
+        market = exchange.markets.get(symbol)
+        if not market:
+            return None, None, None
+        
+        info = market.get('info', {})
+        filters = info.get('filters', [])
+        
+        step_size = None
+        min_qty = None
+        min_notional = None
+        
+        for f in filters:
+            if f.get('filterType') == 'LOT_SIZE':
+                step_size = float(f.get('stepSize', 0))
+                min_qty = float(f.get('minQty', 0))
+            elif f.get('filterType') == 'NOTIONAL':
+                min_notional = float(f.get('minNotional', 0))
+        
+        return step_size, min_qty, min_notional
+    except Exception as e:
+        log(f"ERROR getting filters for {symbol}: {e}")
+        return None, None, None
+
+def fmt_qty(exchange, symbol: str, amount: float) -> str:
+    """Format quantity according to symbol filters"""
+    step_size, min_qty, _ = get_binance_filters(exchange, symbol)
+    
+    if step_size and step_size > 0:
+        import math
+        amount = math.floor(amount / step_size) * step_size
+    
+    if min_qty and amount < min_qty:
+        amount = min_qty
+    
+    # Determine decimal places
+    if step_size and step_size > 0:
+        decimals = len(str(step_size).rstrip('0').split('.')[-1]) if '.' in str(step_size) else 0
+    else:
+        decimals = 8
+    
+    return f"{amount:.{decimals}f}"
+
+def calc_amount_from_usdc(exchange, symbol: str, usdc_target: float, ref_price: float) -> float:
+    """Calculate amount from USDC target considering filters"""
+    step_size, min_qty, min_notional = get_binance_filters(exchange, symbol)
+    
+    target = float(usdc_target)
+    if min_notional and target < min_notional:
+        target = min_notional * MIN_NOTIONAL_PAD
+    
+    import math
+    amt = target / max(ref_price, 1e-12)
+    
+    if step_size and step_size > 0:
+        amt = math.floor(amt / step_size) * step_size
+    
+    if min_qty and amt < min_qty:
+        amt = min_qty
+    
+    return float(amt)
+
+def get_cross_base_free(exchange, symbol: str) -> float:
+    """Get available base asset balance in cross margin account"""
+    base = symbol.split("/")[0].strip().upper()
+    try:
+        data = exchange.sapiGetMarginAccount({
+            "timestamp": exchange.milliseconds(),
+            "recvWindow": 60000
+        })
+        assets = data.get("userAssets") or []
+        for a in assets:
+            if (a.get("asset") or "").upper() == base:
+                return float(a.get("free", 0.0) or 0.0)
+        return 0.0
+    except Exception as e:
+        log(f"WARN cannot fetch cross margin balance for {symbol}: {e}")
+        return 0.0
+
+def place_entry_market(exchange, symbol: str, side: str, ref_price: float):
+    """Place market entry order on cross margin"""
+    bsym = to_binance_symbol(symbol)
+    
+    try:
+        if side == "LONG":
+            # Buy on cross margin
+            params = {
+                "symbol": bsym,
+                "side": "BUY",
+                "type": "MARKET",
+                "sideEffectType": "MARGIN_BUY",
+                "quoteOrderQty": str(int(TRADE_USDC_TARGET)),
+                "timestamp": exchange.milliseconds(),
+                "recvWindow": 60000,
+            }
+            order = exchange.sapiPostMarginOrder(params)
+            filled_qty = float(order.get("executedQty", 0.0))
+            filled_price = float(order.get("cummulativeQuoteQty", 0.0)) / max(filled_qty, 1e-12)
+            return order, filled_qty, filled_price
+        
+        else:  # SHORT
+            # Sell on cross margin (borrow)
+            amount = calc_amount_from_usdc(exchange, symbol, TRADE_USDC_TARGET, ref_price)
+            params = {
+                "symbol": bsym,
+                "side": "SELL",
+                "type": "MARKET",
+                "quantity": fmt_qty(exchange, symbol, amount),
+                "sideEffectType": "AUTO_BORROW_REPAY",
+                "timestamp": exchange.milliseconds(),
+                "recvWindow": 60000,
+            }
+            order = exchange.sapiPostMarginOrder(params)
+            filled_qty = float(order.get("executedQty", amount))
+            filled_price = float(order.get("cummulativeQuoteQty", 0.0)) / max(filled_qty, 1e-12)
+            return order, filled_qty, filled_price
+    
+    except Exception as e:
+        log(f"ERROR placing entry order for {symbol} {side}: {e}")
+        raise
+
+def place_close_market(exchange, symbol: str, side: str, amount: float):
+    """Place market close order on cross margin"""
+    bsym = to_binance_symbol(symbol)
+    
+    if amount <= 0:
+        raise ValueError(f"Invalid amount for close: {amount}")
+    
+    try:
+        params = {
+            "symbol": bsym,
+            "type": "MARKET",
+            "quantity": fmt_qty(exchange, symbol, amount),
+            "sideEffectType": "AUTO_REPAY",
+            "timestamp": exchange.milliseconds(),
+            "recvWindow": 60000,
+        }
+        
+        # Opposite side to close
+        params["side"] = "SELL" if side == "LONG" else "BUY"
+        
+        order = exchange.sapiPostMarginOrder(params)
+        return order
+    
+    except Exception as e:
+        log(f"ERROR placing close order for {symbol} {side}: {e}")
+        raise
 
 # ===================== SWING DETECTION =====================
 def find_swings(df: pd.DataFrame, lr: int = 2) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
@@ -434,30 +625,62 @@ def calculate_sl_tp(df: pd.DataFrame, side: str, entry_price: float, sweep_level
     }
 
 # ===================== POSITION MANAGEMENT =====================
-def open_paper_position(symbol: str, side: str, entry_price: float, sl_tp: dict):
-    """Open a paper trading position"""
-    position = {
-        'symbol': symbol,
-        'side': side,
-        'entry_price': entry_price,
-        'sl_price': sl_tp['sl_price'],
-        'tp1_price': sl_tp['tp1_price'],
-        'tp2_price': sl_tp['tp2_price'],
-        'tp1_hit': False,
-        'entry_time': datetime.utcnow(),
-        'size_usdc': PAPER_POSITION_SIZE_USDC
-    }
-    
-    positions[symbol] = position
-    
-    log(f"📈 PAPER TRADE OPENED: {symbol} {side}")
-    log(f"   Entry: ${entry_price:.4f}")
-    log(f"   SL: ${sl_tp['sl_price']:.4f} ({((sl_tp['sl_price']/entry_price - 1) * 100):.2f}%)")
-    log(f"   TP1: ${sl_tp['tp1_price']:.4f} ({((sl_tp['tp1_price']/entry_price - 1) * 100):.2f}%)")
-    log(f"   TP2: ${sl_tp['tp2_price']:.4f} ({((sl_tp['tp2_price']/entry_price - 1) * 100):.2f}%)")
+def open_position(exchange, symbol: str, side: str, entry_price: float, sl_tp: dict):
+    """Open a position (paper or live trading)"""
+    if LIVE_TRADING:
+        # Live trading on cross margin
+        try:
+            log(f"🔥 OPENING LIVE POSITION: {symbol} {side}")
+            order, filled_qty, filled_price = place_entry_market(exchange, symbol, side, entry_price)
+            
+            position = {
+                'symbol': symbol,
+                'side': side,
+                'entry_price': filled_price,
+                'sl_price': sl_tp['sl_price'],
+                'tp1_price': sl_tp['tp1_price'],
+                'tp2_price': sl_tp['tp2_price'],
+                'tp1_hit': False,
+                'entry_time': datetime.utcnow(),
+                'amount': filled_qty,
+                'size_usdc': TRADE_USDC_TARGET
+            }
+            
+            positions[symbol] = position
+            
+            log(f"✅ LIVE POSITION OPENED: {symbol} {side}")
+            log(f"   Entry: ${filled_price:.4f} (Qty: {filled_qty:.6f})")
+            log(f"   SL: ${sl_tp['sl_price']:.4f} ({((sl_tp['sl_price']/filled_price - 1) * 100):.2f}%)")
+            log(f"   TP1: ${sl_tp['tp1_price']:.4f} ({((sl_tp['tp1_price']/filled_price - 1) * 100):.2f}%)")
+            log(f"   TP2: ${sl_tp['tp2_price']:.4f} ({((sl_tp['tp2_price']/filled_price - 1) * 100):.2f}%)")
+        
+        except Exception as e:
+            log(f"❌ ERROR opening live position: {e}")
+            return
+    else:
+        # Paper trading
+        position = {
+            'symbol': symbol,
+            'side': side,
+            'entry_price': entry_price,
+            'sl_price': sl_tp['sl_price'],
+            'tp1_price': sl_tp['tp1_price'],
+            'tp2_price': sl_tp['tp2_price'],
+            'tp1_hit': False,
+            'entry_time': datetime.utcnow(),
+            'size_usdc': PAPER_POSITION_SIZE_USDC
+        }
+        
+        positions[symbol] = position
+        
+        log(f"📈 PAPER TRADE OPENED: {symbol} {side}")
+        log(f"   Entry: ${entry_price:.4f}")
+        log(f"   SL: ${sl_tp['sl_price']:.4f} ({((sl_tp['sl_price']/entry_price - 1) * 100):.2f}%)")
+        log(f"   TP1: ${sl_tp['tp1_price']:.4f} ({((sl_tp['tp1_price']/entry_price - 1) * 100):.2f}%)")
+        log(f"   TP2: ${sl_tp['tp2_price']:.4f} ({((sl_tp['tp2_price']/entry_price - 1) * 100):.2f}%)")
 
-def close_paper_position(symbol: str, exit_price: float, exit_reason: str):
-    """Close a paper trading position and log to CSV"""
+def close_position(exchange, symbol: str, exit_price: float, exit_reason: str):
+    """Close a position (paper or live trading) and log to CSV"""
     if symbol not in positions:
         return
     
@@ -467,14 +690,41 @@ def close_paper_position(symbol: str, exit_price: float, exit_reason: str):
     exit_time = datetime.utcnow()
     duration_min = (exit_time - entry_time).total_seconds() / 60
     
+    if LIVE_TRADING:
+        # Close live position
+        try:
+            # For LONG, get actual base balance
+            if pos['side'] == 'LONG':
+                amount = get_cross_base_free(exchange, symbol)
+                if amount <= 0:
+                    amount = pos.get('amount', 0.0)
+            else:
+                amount = pos.get('amount', 0.0)
+            
+            log(f"🔥 CLOSING LIVE POSITION: {symbol} {pos['side']} (Amount: {amount:.6f})")
+            order = place_close_market(exchange, symbol, pos['side'], amount)
+            
+            # Get actual exit price from order
+            filled_qty = float(order.get("executedQty", amount))
+            filled_quote = float(order.get("cummulativeQuoteQty", 0.0))
+            if filled_qty > 0:
+                exit_price = filled_quote / filled_qty
+            
+            log(f"✅ LIVE POSITION CLOSED: {symbol} at ${exit_price:.4f}")
+        
+        except Exception as e:
+            log(f"❌ ERROR closing live position: {e}")
+            # Continue to log the trade even if close failed
+    
     # Calculate PnL
     if pos['side'] == 'LONG':
         pnl_gross_pct = ((exit_price / entry_price) - 1) * 100
     else:  # SHORT
         pnl_gross_pct = ((entry_price / exit_price) - 1) * 100
     
-    # Assume 0.1% fee round trip for paper trading
-    pnl_net_pct = pnl_gross_pct - 0.1
+    # Fee estimation (0.1% for paper, 0.2% for live)
+    fee_pct = 0.2 if LIVE_TRADING else 0.1
+    pnl_net_pct = pnl_gross_pct - fee_pct
     
     # Log to CSV
     trade_data = {
@@ -495,7 +745,8 @@ def close_paper_position(symbol: str, exit_price: float, exit_reason: str):
     log_trade_to_csv(trade_data)
     
     # Console log
-    log(f"🔴 PAPER TRADE CLOSED: {symbol} {pos['side']}")
+    mode = "LIVE" if LIVE_TRADING else "PAPER"
+    log(f"🔴 {mode} TRADE CLOSED: {symbol} {pos['side']}")
     log(f"   Exit: ${exit_price:.4f}")
     log(f"   PnL: {pnl_net_pct:.2f}% (Net)")
     log(f"   Duration: {duration_min:.1f} min")
@@ -518,12 +769,12 @@ def check_position_exit(exchange, symbol: str, df: pd.DataFrame):
     if pos['side'] == 'LONG':
         # Check SL hit
         if low <= pos['sl_price']:
-            close_paper_position(symbol, pos['sl_price'], 'SL_HIT')
+            close_position(exchange, symbol, pos['sl_price'], 'SL_HIT')
             return
         
         # Check TP2 hit first (full exit)
         if high >= pos['tp2_price']:
-            close_paper_position(symbol, pos['tp2_price'], 'TP2_HIT')
+            close_position(exchange, symbol, pos['tp2_price'], 'TP2_HIT')
             return
         
         # Check TP1 hit (move SL to BE)
@@ -536,12 +787,12 @@ def check_position_exit(exchange, symbol: str, df: pd.DataFrame):
     else:  # SHORT
         # Check SL hit
         if high >= pos['sl_price']:
-            close_paper_position(symbol, pos['sl_price'], 'SL_HIT')
+            close_position(exchange, symbol, pos['sl_price'], 'SL_HIT')
             return
         
         # Check TP2 hit first (full exit)
         if low <= pos['tp2_price']:
-            close_paper_position(symbol, pos['tp2_price'], 'TP2_HIT')
+            close_position(exchange, symbol, pos['tp2_price'], 'TP2_HIT')
             return
         
         # Check TP1 hit (move SL to BE)
@@ -615,11 +866,16 @@ def scan_symbol(exchange, symbol: str, df_bias: pd.DataFrame, df_entry: pd.DataF
             entry_price = float(df_entry.iloc[-1]['close'])
             side = 'LONG' if bias == 'BULLISH' else 'SHORT'
             
+            # Check max positions limit for live trading
+            if LIVE_TRADING and len(positions) >= MAX_OPEN_POS:
+                log(f"⚠️  {symbol}: SKIP - Max positions ({MAX_OPEN_POS}) reached")
+                return
+            
             # Calculate SL/TP
             sl_tp = calculate_sl_tp(df_entry, side, entry_price, setup['sweep_level'])
             
-            # Open paper position
-            open_paper_position(symbol, side, entry_price, sl_tp)
+            # Open position
+            open_position(exchange, symbol, side, entry_price, sl_tp)
             
             # Clear pending setup
             del pending[symbol]
@@ -629,9 +885,18 @@ def scan_symbol(exchange, symbol: str, df_bias: pd.DataFrame, df_entry: pd.DataF
 def main():
     """Main bot loop"""
     log("=" * 60)
-    log("MINIMALIST ICT PAPER TRADING BOT")
-    log("=" * 60)
-    log(f"Paper Trading Mode: {not LIVE_TRADING}")
+    if LIVE_TRADING:
+        log("⚠️  ⚠️  ⚠️  LIVE TRADING MODE - CROSS MARGIN  ⚠️  ⚠️  ⚠️")
+        log("WARNING: This bot will trade with REAL MONEY!")
+        log("=" * 60)
+        log(f"Max Positions: {MAX_OPEN_POS}")
+        log(f"Trade Size: ${TRADE_USDC_TARGET} USDT per trade")
+    else:
+        log("MINIMALIST ICT PAPER TRADING BOT")
+        log("=" * 60)
+        log(f"Paper Trading Mode: Active (No real money)")
+        log(f"Position Size: ${PAPER_POSITION_SIZE_USDC} USDT per trade")
+    
     log(f"Symbols: {', '.join(SYMBOLS)}")
     log(f"Bias TF: {BIAS_TF} | Entry TF: {ENTRY_TF}")
     log("=" * 60)
@@ -642,7 +907,12 @@ def main():
     # Initialize exchange
     exchange = init_exchange()
     
-    log("\n🤖 Bot started! Press Ctrl+C to stop.\n")
+    if LIVE_TRADING:
+        log("\n🔥 LIVE TRADING ACTIVE - Bot will execute real orders!")
+    else:
+        log("\n🤖 PAPER TRADING - Bot will simulate trades only.")
+    
+    log("Press Ctrl+C to stop.\n")
     
     loop_count = 0
     
@@ -668,7 +938,8 @@ def main():
                     log(f"❌ ERROR processing {symbol}: {e}")
             
             # Status summary
-            log(f"\n📊 Status: {len(positions)} open positions, {len(pending)} pending setups")
+            mode = "LIVE" if LIVE_TRADING else "PAPER"
+            log(f"\n📊 {mode} Status: {len(positions)} open positions, {len(pending)} pending setups")
             
             if positions:
                 for sym, pos in positions.items():
@@ -690,9 +961,9 @@ def main():
                     df = fetch_ohlcv(exchange, symbol, ENTRY_TF, 10)
                     if not df.empty:
                         exit_price = float(df.iloc[-1]['close'])
-                        close_paper_position(symbol, exit_price, 'BOT_STOPPED')
-                except:
-                    pass
+                        close_position(exchange, symbol, exit_price, 'BOT_STOPPED')
+                except Exception as e:
+                    log(f"Error closing position for {symbol}: {e}")
         
         log("\n✅ Bot shutdown complete")
 
