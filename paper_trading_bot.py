@@ -43,6 +43,12 @@ CONFIG = {
     "MIN_BODY_RATIO": 0.5,  # Corpo minimo per break valido
     "RANGE_BARS_LIMIT": 10,  # Barre consecutive in range per bias NONE
     
+    # Sweep Detection (STEP 2)
+    "SWEEP_MIN_DIST_MULT": 0.10,  # Min sweep distance = ATR * 0.10
+    "SWEEP_RECLAIM_MULT": 0.02,   # Reclaim buffer = ATR * 0.02
+    "SWEEP_WICK_RATIO": 1.2,      # Wick deve essere >= body * 1.2
+    "SWEEP_POOL_SIGNIFICANCE": 0.5,  # Pool deve essere > ATR * 0.5 di distanza
+    
     # Risk Management
     "RISK_PER_TRADE": 0.02,  # 2% del capitale per trade
     "STOP_LOSS_PCT": 0.015,  # Stop Loss al 1.5%
@@ -449,6 +455,117 @@ def compute_bias(df_htf: pd.DataFrame, lr: int = 2) -> Dict:
     }
 
 
+# ===================== SWEEP DETECTION (ICT STEP 2) =====================
+def detect_sweep(bias: str, pool_high: float, pool_low: float, 
+                 o: float, h: float, l: float, c: float, 
+                 atr: float, current_price: float) -> Optional[Dict]:
+    """
+    Rileva sweep (liquidity grab) coerente con bias HTF
+    
+    Parametri:
+    - bias: "UP", "DOWN", o "NONE"
+    - pool_high: ultimo swing high (livello liquidità sopra)
+    - pool_low: ultimo swing low (livello liquidità sotto)
+    - o, h, l, c: open, high, low, close della candela corrente
+    - atr: Average True Range corrente
+    - current_price: prezzo corrente per filtri
+    
+    Ritorna: Dict con dettagli sweep o None se non valido
+    
+    REGOLA ICT: Sweep valido = wick oltre pool + reclaim dentro
+    """
+    if bias == "NONE" or atr == 0:
+        return None
+    
+    # Calcola thresholds ATR-based
+    min_sweep_dist = atr * CONFIG["SWEEP_MIN_DIST_MULT"]  # 0.10 * ATR
+    reclaim_buffer = atr * CONFIG["SWEEP_RECLAIM_MULT"]   # 0.02 * ATR
+    
+    # A) SELL-SIDE SWEEP (per BIAS UP)
+    # Wick sotto pool_low + close recupera sopra
+    sweep_down = (
+        l < pool_low - min_sweep_dist and 
+        c > pool_low + reclaim_buffer
+    )
+    
+    # B) BUY-SIDE SWEEP (per BIAS DOWN)
+    # Wick sopra pool_high + close recupera sotto
+    sweep_up = (
+        h > pool_high + min_sweep_dist and 
+        c < pool_high - reclaim_buffer
+    )
+    
+    # Determina quale sweep è valido in base al bias
+    if bias == "UP":
+        valid = sweep_down
+        direction = "DOWN"  # sweep DOWN per bias UP
+        pool = pool_low
+        extreme = l
+    elif bias == "DOWN":
+        valid = sweep_up
+        direction = "UP"  # sweep UP per bias DOWN
+        pool = pool_high
+        extreme = h
+    else:
+        return None
+    
+    if not valid:
+        return None
+    
+    # === FILTRI QUALITÀ (opzionali ma raccomandati) ===
+    
+    # Filter 1: Wick Dominance
+    # Lo sweep deve avere un wick significativo (stop run vero)
+    body = abs(c - o)
+    
+    if direction == "DOWN":
+        # Sell-side: wick_down >= body * wick_ratio
+        wick_down = min(o, c) - l
+        wick_ok = wick_down >= body * CONFIG["SWEEP_WICK_RATIO"]
+    else:
+        # Buy-side: wick_up >= body * wick_ratio
+        wick_up = h - max(o, c)
+        wick_ok = wick_up >= body * CONFIG["SWEEP_WICK_RATIO"]
+    
+    if not wick_ok:
+        # Sweep con wick troppo piccolo -> probabilmente non è un vero stop run
+        return None
+    
+    # Filter 2: Pool Significance
+    # La pool deve essere abbastanza distante dal prezzo corrente
+    pool_distance = abs(current_price - pool)
+    pool_significant = pool_distance > atr * CONFIG["SWEEP_POOL_SIGNIFICANCE"]
+    
+    if not pool_significant:
+        # Pool troppo vicina, non è significativa
+        return None
+    
+    # === INVALIDAZIONI ===
+    
+    # Invalidazione 1: Sweep senza reclaim (solo wick, close oltre pool)
+    if direction == "DOWN" and c < pool_low:
+        # Non è sweep, è possibile breakdown
+        return None
+    
+    if direction == "UP" and c > pool_high:
+        # Non è sweep, è possibile breakup
+        return None
+    
+    # Invalidazione 2: Violazione troppo piccola (già coperto da min_sweep_dist)
+    # È già verificato nelle condizioni sweep_down/sweep_up
+    
+    # === SWEEP VALIDO ===
+    return {
+        "direction": direction,
+        "pool": pool,
+        "extreme": extreme,
+        "close": c,
+        "atr": atr,
+        "wick_ratio": wick_down / body if direction == "DOWN" else wick_up / body,
+        "pool_distance": pool_distance,
+    }
+
+
 def check_entry_signal(bias: str, df_ltf: pd.DataFrame) -> Optional[str]:
     """
     Controlla segnale di entrata su LTF basato su BIAS HTF
@@ -536,9 +653,41 @@ def main():
                     print(f"  BIAS HTF: {bias} ({bias_info.get('reason', 'N/A')})")
                     
                     # Log dettagli bias
+                    pool_high = None
+                    pool_low = None
                     if "external_high" in bias_info:
-                        print(f"    External High: ${bias_info['external_high']:,.2f}")
-                        print(f"    External Low: ${bias_info['external_low']:,.2f}")
+                        pool_high = bias_info['external_high']
+                        pool_low = bias_info['external_low']
+                        print(f"    External High: ${pool_high:,.2f}")
+                        print(f"    External Low: ${pool_low:,.2f}")
+                    
+                    # 2. DETECT SWEEP su HTF (STEP 2)
+                    sweep_detected = None
+                    if bias != "NONE" and pool_high and pool_low:
+                        # Calcola ATR su HTF
+                        atr_htf = calculate_atr(df_htf, CONFIG["ATR_PERIOD"])
+                        current_atr = float(atr_htf.iloc[-1]) if not pd.isna(atr_htf.iloc[-1]) else 0
+                        
+                        if current_atr > 0:
+                            # Prendi ultima candela HTF
+                            last_candle = df_htf.iloc[-1]
+                            o = float(last_candle["open"])
+                            h = float(last_candle["high"])
+                            l = float(last_candle["low"])
+                            c = float(last_candle["close"])
+                            
+                            # Detect sweep
+                            sweep_detected = detect_sweep(
+                                bias, pool_high, pool_low,
+                                o, h, l, c, current_atr, current_price
+                            )
+                            
+                            if sweep_detected:
+                                print(f"  [SWEEP DETECTED!] Direction: {sweep_detected['direction']}")
+                                print(f"    Pool: ${sweep_detected['pool']:,.2f}")
+                                print(f"    Extreme: ${sweep_detected['extreme']:,.2f}")
+                                print(f"    Wick Ratio: {sweep_detected['wick_ratio']:.2f}x")
+                                print(f"    Pool Distance: ${sweep_detected['pool_distance']:,.2f}")
                     
                     # Controlla posizione esistente
                     position = account.get_position(symbol)
@@ -550,11 +699,19 @@ def main():
                             account.close_position(symbol, current_price, exit_reason)
                     else:
                         # Controlla entry (solo se sotto il limite di posizioni)
+                        # Per ora usiamo solo BIAS, nel prossimo step useremo SWEEP
                         if len(account.positions) < CONFIG["MAX_POSITIONS"]:
-                            signal = check_entry_signal(bias, df_ltf)
+                            # Entry basato su SWEEP detection (se presente)
+                            signal = None
+                            if sweep_detected:
+                                # Se c'è sweep valido, entry nella direzione del bias
+                                if bias == "UP":
+                                    signal = "LONG"
+                                elif bias == "DOWN":
+                                    signal = "SHORT"
                             
                             if signal:
-                                print(f"  [SIGNAL] {signal} detected!")
+                                print(f"  [SIGNAL] {signal} detected after SWEEP!")
                                 
                                 # Calcola size basato sul risk management
                                 risk_amount = account.get_balance() * CONFIG["RISK_PER_TRADE"]
