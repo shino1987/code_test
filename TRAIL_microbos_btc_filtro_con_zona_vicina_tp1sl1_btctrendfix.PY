@@ -1493,7 +1493,6 @@ while True:
                             # ✅ CONFIRMED! Transition to VALID_SETUP
                             p["state"] = STATE_VALID_SETUP
                             p["confirm_bar_index"] = len(df) - 1
-                            p["bars_since_confirm"] = 0
                             p["confirm_high"] = last["h"]
                             p["confirm_low"] = last["l"]
                             p["displacement"] = {"dir": "UP"}
@@ -1546,7 +1545,6 @@ while True:
                             # ✅ CONFIRMED! Transition to VALID_SETUP
                             p["state"] = STATE_VALID_SETUP
                             p["confirm_bar_index"] = len(df) - 1
-                            p["bars_since_confirm"] = 0
                             p["confirm_high"] = last["h"]
                             p["confirm_low"] = last["l"]
                             p["displacement"] = {"dir": "DOWN"}
@@ -1575,21 +1573,23 @@ while True:
                         reasons["missing_displacement_data"] += 1
                         continue
                     
-                    # Update bars since confirm
-                    p["bars_since_confirm"] = len(df) - 1 - p.get("confirm_bar_index", 0)
+                    # Calculate bars since confirm (how many new bars have appeared)
+                    bars_since_confirm = len(df) - 1 - p.get("confirm_bar_index", len(df) - 1)
                     
-                    # Get current candle (closed candle)
-                    current_candle = last
+                    # Skip the confirm candle itself - wait for next bar
+                    if bars_since_confirm == 0:
+                        reasons["entry_waiting"] += 1
+                        continue
                     
                     # Generate entry
                     entry = generate_entry(
                         disp_dir=displacement["dir"],
                         confirm_high=p["confirm_high"],
                         confirm_low=p["confirm_low"],
-                        current_high=current_candle["h"],
-                        current_low=current_candle["l"],
-                        current_close=current_candle["c"],
-                        bars_since_confirm=p["bars_since_confirm"],
+                        current_high=last["h"],
+                        current_low=last["l"],
+                        current_close=last["c"],
+                        bars_since_confirm=bars_since_confirm,
                     )
                     
                     status = entry.get("status")
@@ -1627,7 +1627,7 @@ while True:
                                 f"side={entry_side} "
                                 f"entry_price={entry_price:.6f} "
                                 f"confirm_range=[{entry['confirm_low']:.6f}-{entry['confirm_high']:.6f}] "
-                                f"bars_since_confirm={p['bars_since_confirm']} "
+                                f"bars_since_confirm={bars_since_confirm} "
                                 f"→ OPENING POSITION",
                                 flush=True
                             )
@@ -1640,7 +1640,7 @@ while True:
                     
                     elif status == "EXPIRED":
                         if DEBUG_TERMINAL:
-                            print(f"[{symbol}] ENTRY EXPIRED ({p['bars_since_confirm']} bars > {MAX_ENTRY_BARS}) → RESET to WAIT_SWEEP", flush=True)
+                            print(f"[{symbol}] ENTRY EXPIRED ({bars_since_confirm} bars > {MAX_ENTRY_BARS}) → RESET to WAIT_SWEEP", flush=True)
                         pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
                         reasons["entry_expired"] += 1
                     
