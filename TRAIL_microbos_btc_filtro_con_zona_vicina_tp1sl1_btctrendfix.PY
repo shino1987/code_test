@@ -244,8 +244,20 @@ def fetch_df(symbol: str, tf: str, limit: int) -> pd.DataFrame:
 
 # ===================== HELPERS =====================
 def find_swings(df: pd.DataFrame, lr: int = 2):
+    """
+    Find swing highs and lows in price data.
+    
+    Args:
+        df: DataFrame with OHLC data
+        lr: Look-back/look-forward range for swing detection
+    
+    Returns:
+        tuple: (swing_highs, swing_lows) as lists of (index, price) tuples
+    """
     # Validate DataFrame has enough data
-    if df.empty or len(df) < (2 * lr + 1):
+    # Need at least lr candles before + lr candles after + 1 center candle
+    min_required_rows = (2 * lr) + 1
+    if df.empty or len(df) < min_required_rows:
         return [], []
     
     highs = df["high"].astype(float).values
@@ -881,6 +893,19 @@ def _find_last_displacement_idx_15m(df15: pd.DataFrame, side: str) -> int:
     return -1
 
 def structural_sl_from_last_ob_15m(entry: float, side: str, df15: pd.DataFrame):
+    """
+    Calculate structural stop-loss based on last order block on 15m timeframe.
+    
+    Args:
+        entry: Entry price for the trade
+        side: "LONG" or "SHORT"
+        df15: 15-minute timeframe DataFrame
+    
+    Returns:
+        tuple: (sl_price, sl_type) where:
+            - sl_price: Stop loss price level, or None if cannot be calculated
+            - sl_type: Type of SL ("STRUCT_15M" or "CAP_0.65%"), or None if cannot be calculated
+    """
     # Validate inputs
     if df15.empty:
         print(f"[SL] Warning: Empty DataFrame for SL calculation", flush=True)

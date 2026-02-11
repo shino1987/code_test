@@ -12,7 +12,8 @@ def check_env_var(name, description):
     """Check if environment variable is set"""
     value = os.getenv(name)
     if value:
-        print(f"✓ {name}: Set (length: {len(value)} chars)")
+        # Don't display length for security reasons
+        print(f"✓ {name}: Set")
         return True
     else:
         print(f"✗ {name}: NOT SET - {description}")
