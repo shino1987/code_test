@@ -1171,14 +1171,10 @@ def calculate_sl_tp(side: str, entry_price: float,
     else:  # SHORT
         tp = entry_price - TP_R_MULTIPLE * r
     
-    # Calculate R ratio
-    r_ratio = TP_R_MULTIPLE  # Always 2.0 for 2R
-    
     return {
         "sl": sl,
         "tp": tp,
         "r": r,
-        "r_ratio": r_ratio,
     }
 
 # ===================== OPEN/CLOSE =====================
@@ -1453,6 +1449,28 @@ while True:
                         pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
                         continue
 
+                    # Get sweep extreme and retrace point (common for both LONG and SHORT)
+                    sweep_extreme = p.get("sweep_extreme")
+                    retrace_point = p.get("retrace_point")
+                    
+                    if sweep_extreme is None or retrace_point is None:
+                        if DEBUG_TERMINAL:
+                            print(f"[{symbol}] MISSING sweep_extreme or retrace_point → RESET", flush=True)
+                        pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                        reasons["missing_sweep_retrace"] += 1
+                        continue
+                    
+                    # Calculate ATR from M15 (common for both LONG and SHORT)
+                    atr_series = atr(df_sl, 14)
+                    atr_m15 = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
+                    
+                    if atr_m15 <= 0:
+                        if DEBUG_TERMINAL:
+                            print(f"[{symbol}] Invalid ATR M15 → RESET", flush=True)
+                        pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                        reasons["invalid_atr"] += 1
+                        continue
+
                     
 
                     if side == "LONG":
@@ -1481,28 +1499,6 @@ while True:
                                     pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
                                     continue
 
-                            # Get sweep extreme and retrace point
-                            sweep_extreme = p.get("sweep_extreme")
-                            retrace_point = p.get("retrace_point")
-                            
-                            if sweep_extreme is None or retrace_point is None:
-                                if DEBUG_TERMINAL:
-                                    print(f"[{symbol}] MISSING sweep_extreme or retrace_point → RESET", flush=True)
-                                pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
-                                reasons["missing_sweep_retrace"] += 1
-                                continue
-                            
-                            # Calculate ATR from M15
-                            atr_series = atr(df_sl, 14)
-                            atr_m15 = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
-                            
-                            if atr_m15 <= 0:
-                                if DEBUG_TERMINAL:
-                                    print(f"[{symbol}] Invalid ATR M15 → RESET", flush=True)
-                                pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
-                                reasons["invalid_atr"] += 1
-                                continue
-                            
                             # Calculate SL/TP using structural method
                             sl_tp = calculate_sl_tp(
                                 side="LONG",
@@ -1569,28 +1565,6 @@ while True:
                                     pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
                                     continue
 
-                            # Get sweep extreme and retrace point
-                            sweep_extreme = p.get("sweep_extreme")
-                            retrace_point = p.get("retrace_point")
-                            
-                            if sweep_extreme is None or retrace_point is None:
-                                if DEBUG_TERMINAL:
-                                    print(f"[{symbol}] MISSING sweep_extreme or retrace_point → RESET", flush=True)
-                                pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
-                                reasons["missing_sweep_retrace"] += 1
-                                continue
-                            
-                            # Calculate ATR from M15
-                            atr_series = atr(df_sl, 14)
-                            atr_m15 = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
-                            
-                            if atr_m15 <= 0:
-                                if DEBUG_TERMINAL:
-                                    print(f"[{symbol}] Invalid ATR M15 → RESET", flush=True)
-                                pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
-                                reasons["invalid_atr"] += 1
-                                continue
-                            
                             # Calculate SL/TP using structural method
                             sl_tp = calculate_sl_tp(
                                 side="SHORT",
