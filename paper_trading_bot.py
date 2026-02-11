@@ -10,12 +10,16 @@ import os
 import time
 import json
 import csv
-from datetime import datetime
+import logging
+from logging.handlers import RotatingFileHandler
+from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_DOWN
 import ccxt
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
+import xlsxwriter
+from collections import defaultdict
 
 # ===================== CONFIGURAZIONE =====================
 CONFIG = {
@@ -87,10 +91,104 @@ CONFIG = {
     "TRADES_LOG": "paper_trades.csv",
     "BALANCE_LOG": "paper_balance.csv",
     "BIAS_LOG": "paper_bias_log.csv",
+    "ICT_SIGNALS_LOG": "ict_signals.csv",
+    "DEBUG_LOG": "paper_trading_debug.log",
+    "EXCEL_REPORT": "paper_trading_report.xlsx",
+    "EXPORT_EXCEL_EVERY_N_TRADES": 10,  # Export Excel ogni 10 trade
     
     # Telegram (opzionale)
     "TELEGRAM_ENABLED": False,
 }
+
+
+# ===================== LOGGING SETUP =====================
+def setup_logging():
+    """Configura sistema di logging avanzato"""
+    # Crea logger
+    logger = logging.getLogger('PaperTradingBot')
+    logger.setLevel(logging.DEBUG)
+    
+    # Rimuovi handler esistenti
+    logger.handlers = []
+    
+    # Console handler (INFO e superiori)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_format = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_handler.setFormatter(console_format)
+    
+    # File handler rotativo (DEBUG e superiori)
+    file_handler = RotatingFileHandler(
+        CONFIG["DEBUG_LOG"],
+        maxBytes=10*1024*1024,  # 10 MB
+        backupCount=5
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_format = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(funcName)s:%(lineno)d - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_format)
+    
+    # Aggiungi handlers
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+    
+    return logger
+
+# Inizializza logger globale
+logger = setup_logging()
+
+
+# ===================== ICT SIGNALS LOGGER =====================
+class ICTSignalLogger:
+    """Logger dedicato per segnali ICT"""
+    
+    def __init__(self):
+        self.signals = []
+    
+    def log_signal(self, timestamp, symbol, timeframe, step, result, grade=None, details=None):
+        """Registra un segnale ICT"""
+        signal = {
+            "timestamp": timestamp,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "step": step,  # BIAS, SWEEP, DISPLACEMENT, RETRACE, CONFIRM, ENTRY
+            "result": result,  # VALID, INVALID, WAIT, EXPIRED, HIT, CONFIRMED
+            "grade": grade,  # A, B, None
+            "details": json.dumps(details) if details else ""
+        }
+        self.signals.append(signal)
+        
+        # Log su file CSV
+        self._save_to_csv(signal)
+        
+        # Log dettagliato
+        logger.debug(f"ICT Signal: {step} - {result} (Grade: {grade}) | {symbol} {timeframe}")
+    
+    def _save_to_csv(self, signal):
+        """Salva segnale su CSV"""
+        file_exists = os.path.isfile(CONFIG["ICT_SIGNALS_LOG"])
+        
+        with open(CONFIG["ICT_SIGNALS_LOG"], "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=[
+                "timestamp", "symbol", "timeframe", "step", "result", "grade", "details"
+            ])
+            
+            if not file_exists:
+                writer.writeheader()
+            
+            writer.writerow(signal)
+    
+    def get_signals(self):
+        """Ritorna tutti i segnali registrati"""
+        return self.signals
+
+# Inizializza ICT signal logger globale
+ict_logger = ICTSignalLogger()
 
 
 # ===================== PAPER ACCOUNT =====================
@@ -240,6 +338,328 @@ class PaperAccount:
             "avg_pnl": total_pnl / total_trades if total_trades > 0 else 0.0,
             "roi": ((self.equity - self.initial_capital) / self.initial_capital * 100)
         }
+    
+    def get_advanced_statistics(self) -> Dict:
+        """Calcola statistiche avanzate"""
+        if not self.closed_trades:
+            return {}
+        
+        total_trades = len(self.closed_trades)
+        pnls = [t["pnl"] for t in self.closed_trades]
+        winning_trades = [t for t in self.closed_trades if t["pnl"] > 0]
+        losing_trades = [t for t in self.closed_trades if t["pnl"] <= 0]
+        
+        # Profit factor
+        total_wins = sum(t["pnl"] for t in winning_trades) if winning_trades else 0
+        total_losses = abs(sum(t["pnl"] for t in losing_trades)) if losing_trades else 0
+        profit_factor = total_wins / total_losses if total_losses > 0 else float('inf')
+        
+        # Max drawdown
+        equity_curve = [self.initial_capital]
+        for trade in self.closed_trades:
+            equity_curve.append(equity_curve[-1] + trade["pnl"])
+        
+        peak = equity_curve[0]
+        max_dd = 0
+        for equity in equity_curve:
+            if equity > peak:
+                peak = equity
+            dd = (peak - equity) / peak * 100
+            if dd > max_dd:
+                max_dd = dd
+        
+        # Best & Worst trade
+        best_trade = max(pnls)
+        worst_trade = min(pnls)
+        
+        # Average trade duration
+        durations = []
+        for t in self.closed_trades:
+            if isinstance(t["open_time"], datetime) and isinstance(t["close_time"], datetime):
+                duration = (t["close_time"] - t["open_time"]).total_seconds() / 60  # minuti
+                durations.append(duration)
+        avg_duration = sum(durations) / len(durations) if durations else 0
+        
+        # Consecutive wins/losses
+        max_consecutive_wins = 0
+        max_consecutive_losses = 0
+        current_wins = 0
+        current_losses = 0
+        
+        for t in self.closed_trades:
+            if t["pnl"] > 0:
+                current_wins += 1
+                current_losses = 0
+                max_consecutive_wins = max(max_consecutive_wins, current_wins)
+            else:
+                current_losses += 1
+                current_wins = 0
+                max_consecutive_losses = max(max_consecutive_losses, current_losses)
+        
+        return {
+            "profit_factor": profit_factor,
+            "max_drawdown_pct": max_dd,
+            "best_trade": best_trade,
+            "worst_trade": worst_trade,
+            "avg_trade_duration_min": avg_duration,
+            "max_consecutive_wins": max_consecutive_wins,
+            "max_consecutive_losses": max_consecutive_losses,
+            "expectancy": sum(pnls) / total_trades if total_trades > 0 else 0,
+            "sharpe_ratio": (np.mean(pnls) / np.std(pnls)) if len(pnls) > 1 and np.std(pnls) > 0 else 0
+        }
+    
+    def export_to_excel(self):
+        """Esporta tutto in Excel con formattazione"""
+        logger.info(f"Exporting data to Excel: {CONFIG['EXCEL_REPORT']}")
+        
+        try:
+            workbook = xlsxwriter.Workbook(CONFIG['EXCEL_REPORT'])
+            
+            # Formati
+            header_format = workbook.add_format({
+                'bold': True,
+                'bg_color': '#4472C4',
+                'font_color': 'white',
+                'border': 1
+            })
+            
+            win_format = workbook.add_format({
+                'bg_color': '#C6EFCE',
+                'font_color': '#006100'
+            })
+            
+            loss_format = workbook.add_format({
+                'bg_color': '#FFC7CE',
+                'font_color': '#9C0006'
+            })
+            
+            money_format = workbook.add_format({'num_format': '$#,##0.00'})
+            pct_format = workbook.add_format({'num_format': '0.00%'})
+            date_format = workbook.add_format({'num_format': 'yyyy-mm-dd hh:mm:ss'})
+            
+            # SHEET 1: Trades
+            self._export_trades_sheet(workbook, header_format, win_format, loss_format, 
+                                     money_format, pct_format, date_format)
+            
+            # SHEET 2: Daily Summary
+            self._export_daily_summary_sheet(workbook, header_format, money_format)
+            
+            # SHEET 3: ICT Signals
+            self._export_ict_signals_sheet(workbook, header_format)
+            
+            # SHEET 4: Statistics
+            self._export_statistics_sheet(workbook, header_format, money_format, pct_format)
+            
+            # SHEET 5: Equity Curve
+            self._export_equity_curve_sheet(workbook, header_format, money_format)
+            
+            workbook.close()
+            logger.info(f"Excel export completed: {CONFIG['EXCEL_REPORT']}")
+            
+        except Exception as e:
+            logger.error(f"Excel export failed: {e}")
+    
+    def _export_trades_sheet(self, workbook, header_format, win_format, loss_format,
+                            money_format, pct_format, date_format):
+        """Sheet 1: Tutti i trade"""
+        worksheet = workbook.add_worksheet('Trades')
+        
+        # Headers
+        headers = ['Symbol', 'Side', 'Entry Price', 'Exit Price', 'Size', 
+                  'P&L', 'P&L %', 'Open Time', 'Close Time', 'Duration (min)', 'Reason']
+        for col, header in enumerate(headers):
+            worksheet.write(0, col, header, header_format)
+        
+        # Data
+        for row, trade in enumerate(self.closed_trades, start=1):
+            worksheet.write(row, 0, trade['symbol'])
+            worksheet.write(row, 1, trade['side'])
+            worksheet.write(row, 2, trade['entry_price'], money_format)
+            worksheet.write(row, 3, trade['exit_price'], money_format)
+            worksheet.write(row, 4, trade['size'])
+            
+            # P&L con colore
+            pnl = trade['pnl']
+            fmt = win_format if pnl > 0 else loss_format
+            worksheet.write(row, 5, pnl, fmt)
+            worksheet.write(row, 6, trade['pnl_pct'] / 100, fmt)
+            
+            worksheet.write(row, 7, trade['open_time'].strftime('%Y-%m-%d %H:%M:%S') if isinstance(trade['open_time'], datetime) else str(trade['open_time']))
+            worksheet.write(row, 8, trade['close_time'].strftime('%Y-%m-%d %H:%M:%S') if isinstance(trade['close_time'], datetime) else str(trade['close_time']))
+            
+            # Duration
+            if isinstance(trade['open_time'], datetime) and isinstance(trade['close_time'], datetime):
+                duration = (trade['close_time'] - trade['open_time']).total_seconds() / 60
+                worksheet.write(row, 9, duration)
+            
+            worksheet.write(row, 10, trade['reason'])
+        
+        # Totali
+        if self.closed_trades:
+            total_row = len(self.closed_trades) + 1
+            worksheet.write(total_row, 4, 'TOTAL:', header_format)
+            worksheet.write_formula(total_row, 5, f'=SUM(F2:F{total_row})', money_format)
+            worksheet.write_formula(total_row, 6, f'=AVERAGE(G2:G{total_row})', pct_format)
+        
+        # Larghezza colonne
+        worksheet.set_column('A:A', 12)
+        worksheet.set_column('B:B', 8)
+        worksheet.set_column('C:D', 12)
+        worksheet.set_column('E:E', 10)
+        worksheet.set_column('F:G', 12)
+        worksheet.set_column('H:I', 20)
+        worksheet.set_column('J:J', 15)
+        worksheet.set_column('K:K', 10)
+    
+    def _export_daily_summary_sheet(self, workbook, header_format, money_format):
+        """Sheet 2: Sommario giornaliero"""
+        worksheet = workbook.add_worksheet('Daily Summary')
+        
+        # Raggruppa per giorno
+        daily_data = defaultdict(lambda: {'trades': 0, 'pnl': 0, 'wins': 0, 'losses': 0})
+        
+        for trade in self.closed_trades:
+            if isinstance(trade['close_time'], datetime):
+                date = trade['close_time'].date()
+                daily_data[date]['trades'] += 1
+                daily_data[date]['pnl'] += trade['pnl']
+                if trade['pnl'] > 0:
+                    daily_data[date]['wins'] += 1
+                else:
+                    daily_data[date]['losses'] += 1
+        
+        # Headers
+        headers = ['Date', 'Trades', 'Wins', 'Losses', 'Win Rate %', 'P&L']
+        for col, header in enumerate(headers):
+            worksheet.write(0, col, header, header_format)
+        
+        # Data
+        for row, (date, data) in enumerate(sorted(daily_data.items()), start=1):
+            worksheet.write(row, 0, str(date))
+            worksheet.write(row, 1, data['trades'])
+            worksheet.write(row, 2, data['wins'])
+            worksheet.write(row, 3, data['losses'])
+            win_rate = (data['wins'] / data['trades'] * 100) if data['trades'] > 0 else 0
+            worksheet.write(row, 4, win_rate)
+            worksheet.write(row, 5, data['pnl'], money_format)
+        
+        worksheet.set_column('A:A', 12)
+        worksheet.set_column('B:E', 10)
+        worksheet.set_column('F:F', 15)
+    
+    def _export_ict_signals_sheet(self, workbook, header_format):
+        """Sheet 3: ICT Signals log"""
+        worksheet = workbook.add_worksheet('ICT Signals')
+        
+        signals = ict_logger.get_signals()
+        
+        # Headers
+        headers = ['Timestamp', 'Symbol', 'Timeframe', 'Step', 'Result', 'Grade', 'Details']
+        for col, header in enumerate(headers):
+            worksheet.write(0, col, header, header_format)
+        
+        # Data
+        for row, signal in enumerate(signals, start=1):
+            worksheet.write(row, 0, str(signal['timestamp']))
+            worksheet.write(row, 1, signal['symbol'])
+            worksheet.write(row, 2, signal['timeframe'])
+            worksheet.write(row, 3, signal['step'])
+            worksheet.write(row, 4, signal['result'])
+            worksheet.write(row, 5, signal['grade'] or '')
+            worksheet.write(row, 6, signal['details'])
+        
+        worksheet.set_column('A:A', 20)
+        worksheet.set_column('B:C', 12)
+        worksheet.set_column('D:E', 15)
+        worksheet.set_column('F:F', 8)
+        worksheet.set_column('G:G', 50)
+    
+    def _export_statistics_sheet(self, workbook, header_format, money_format, pct_format):
+        """Sheet 4: Statistiche"""
+        worksheet = workbook.add_worksheet('Statistics')
+        
+        stats = self.get_statistics()
+        adv_stats = self.get_advanced_statistics()
+        
+        # Headers
+        worksheet.write(0, 0, 'Metric', header_format)
+        worksheet.write(0, 1, 'Value', header_format)
+        
+        # Basic stats
+        metrics = [
+            ('Total Trades', stats.get('total_trades', 0)),
+            ('Winning Trades', stats.get('winning_trades', 0)),
+            ('Losing Trades', stats.get('losing_trades', 0)),
+            ('Win Rate %', stats.get('win_rate', 0)),
+            ('Total P&L', stats.get('total_pnl', 0)),
+            ('Average P&L', stats.get('avg_pnl', 0)),
+            ('ROI %', stats.get('roi', 0)),
+        ]
+        
+        # Advanced stats
+        if adv_stats:
+            metrics.extend([
+                ('Profit Factor', adv_stats.get('profit_factor', 0)),
+                ('Max Drawdown %', adv_stats.get('max_drawdown_pct', 0)),
+                ('Best Trade', adv_stats.get('best_trade', 0)),
+                ('Worst Trade', adv_stats.get('worst_trade', 0)),
+                ('Avg Duration (min)', adv_stats.get('avg_trade_duration_min', 0)),
+                ('Max Consecutive Wins', adv_stats.get('max_consecutive_wins', 0)),
+                ('Max Consecutive Losses', adv_stats.get('max_consecutive_losses', 0)),
+                ('Expectancy', adv_stats.get('expectancy', 0)),
+                ('Sharpe Ratio', adv_stats.get('sharpe_ratio', 0)),
+            ])
+        
+        for row, (metric, value) in enumerate(metrics, start=1):
+            worksheet.write(row, 0, metric)
+            if 'P&L' in metric or 'Trade' in metric:
+                worksheet.write(row, 1, value, money_format)
+            elif '%' in metric or 'Rate' in metric or 'ROI' in metric or 'Drawdown' in metric:
+                worksheet.write(row, 1, value / 100 if value > 1 else value, pct_format)
+            else:
+                worksheet.write(row, 1, value)
+        
+        worksheet.set_column('A:A', 25)
+        worksheet.set_column('B:B', 15)
+    
+    def _export_equity_curve_sheet(self, workbook, header_format, money_format):
+        """Sheet 5: Equity curve"""
+        worksheet = workbook.add_worksheet('Equity Curve')
+        
+        # Headers
+        worksheet.write(0, 0, 'Trade #', header_format)
+        worksheet.write(0, 1, 'Equity', header_format)
+        worksheet.write(0, 2, 'P&L', header_format)
+        
+        # Data
+        equity = self.initial_capital
+        worksheet.write(1, 0, 0)
+        worksheet.write(1, 1, equity, money_format)
+        worksheet.write(1, 2, 0, money_format)
+        
+        for i, trade in enumerate(self.closed_trades, start=1):
+            equity += trade['pnl']
+            worksheet.write(i + 1, 0, i)
+            worksheet.write(i + 1, 1, equity, money_format)
+            worksheet.write(i + 1, 2, trade['pnl'], money_format)
+        
+        # Grafico
+        chart = workbook.add_chart({'type': 'line'})
+        chart.add_series({
+            'name': 'Equity',
+            'categories': f'=\'Equity Curve\'!$A$2:$A${len(self.closed_trades) + 2}',
+            'values': f'=\'Equity Curve\'!$B$2:$B${len(self.closed_trades) + 2}',
+            'line': {'color': 'blue', 'width': 2},
+        })
+        chart.set_title({'name': 'Equity Curve'})
+        chart.set_x_axis({'name': 'Trade Number'})
+        chart.set_y_axis({'name': 'Equity ($)'})
+        chart.set_size({'width': 720, 'height': 400})
+        
+        worksheet.insert_chart('E2', chart)
+        
+        worksheet.set_column('A:A', 10)
+        worksheet.set_column('B:C', 15)
 
 
 # ===================== EXCHANGE CONNECTION =====================
