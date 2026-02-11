@@ -49,6 +49,12 @@ CONFIG = {
     "SWEEP_WICK_RATIO": 1.2,      # Wick deve essere >= body * 1.2
     "SWEEP_POOL_SIGNIFICANCE": 0.5,  # Pool deve essere > ATR * 0.5 di distanza
     
+    # Displacement Detection (STEP 3)
+    "DISPLACEMENT_BOS_BUFFER": 0.02,    # BOS buffer = ATR * 0.02
+    "DISPLACEMENT_IMPULSE_MULT": 0.80,  # Impulso = range >= ATR * 0.80
+    "DISPLACEMENT_BODY_RATIO": 0.55,    # Body dominance >= 55%
+    "MAX_BARS_AFTER_SWEEP": 6,          # Timeout dopo sweep (barre M15)
+    
     # Risk Management
     "RISK_PER_TRADE": 0.02,  # 2% del capitale per trade
     "STOP_LOSS_PCT": 0.015,  # Stop Loss al 1.5%
@@ -566,6 +572,109 @@ def detect_sweep(bias: str, pool_high: float, pool_low: float,
     }
 
 
+# ===================== DISPLACEMENT DETECTION (ICT STEP 3) =====================
+def detect_displacement_m15(bias: str, o: float, h: float, l: float, c: float,
+                           atr: float, last_swing_high: float, last_swing_low: float,
+                           h_i_2: float, l_i_2: float) -> Optional[Dict]:
+    """
+    Rileva displacement (cambio regime) su M15 dopo sweep
+    
+    Parametri:
+    - bias: "UP", "DOWN", o "NONE"
+    - o, h, l, c: open, high, low, close della candela corrente (i)
+    - atr: Average True Range corrente
+    - last_swing_high: ultimo swing high HTF
+    - last_swing_low: ultimo swing low HTF
+    - h_i_2: high della candela i-2 (per FVG)
+    - l_i_2: low della candela i-2 (per FVG)
+    
+    Ritorna: Dict con dettagli displacement o None se non valido
+    
+    REGOLA ICT DISPLACEMENT:
+    - BIAS UP → displacement UP atteso (BOS sopra swing high)
+    - BIAS DOWN → displacement DOWN atteso (BOS sotto swing low)
+    - Impulso: range >= ATR * 0.80
+    - Body dominance: body >= range * 0.55
+    - FVG opzionale: grade A se presente, B altrimenti
+    """
+    if bias == "NONE" or atr == 0:
+        return None
+    
+    # === PARAMETRI ===
+    bos_buffer = atr * CONFIG["DISPLACEMENT_BOS_BUFFER"]  # 0.02 * ATR
+    impulse_mult = CONFIG["DISPLACEMENT_IMPULSE_MULT"]    # 0.80
+    body_ratio = CONFIG["DISPLACEMENT_BODY_RATIO"]        # 0.55
+    
+    # === CALCOLI CANDELA ===
+    candle_range = h - l
+    body = abs(c - o)
+    
+    # === CONDIZIONI ===
+    # 1. Impulso anomalo (range >= ATR * 0.80)
+    impulse_ok = candle_range >= atr * impulse_mult
+    
+    # 2. Body dominance (body >= range * 0.55)
+    body_ok = body >= candle_range * body_ratio if candle_range > 0 else False
+    
+    # 3. Break of Structure (BOS)
+    bos_up = c > (last_swing_high + bos_buffer)
+    bos_down = c < (last_swing_low - bos_buffer)
+    
+    # === FVG DETECTION (3-candle pattern) ===
+    # FVG rialzista: low[i] > high[i-2] (gap verso l'alto)
+    # FVG ribassista: high[i] < low[i-2] (gap verso il basso)
+    fvg = None
+    
+    if l > h_i_2:
+        # FVG UP: c'è un gap tra low corrente e high di 2 barre fa
+        fvg = {
+            "dir": "UP",
+            "low": h_i_2,
+            "high": l
+        }
+    elif h < l_i_2:
+        # FVG DOWN: c'è un gap tra high corrente e low di 2 barre fa
+        fvg = {
+            "dir": "DOWN",
+            "low": h,
+            "high": l_i_2
+        }
+    
+    # === VALIDAZIONE PER BIAS ===
+    if bias == "UP":
+        # Per BIAS UP, aspettiamo displacement UP
+        valid = bos_up and impulse_ok and body_ok
+        disp_dir = "UP"
+        bos_level = last_swing_high
+    elif bias == "DOWN":
+        # Per BIAS DOWN, aspettiamo displacement DOWN
+        valid = bos_down and impulse_ok and body_ok
+        disp_dir = "DOWN"
+        bos_level = last_swing_low
+    else:
+        return None
+    
+    if not valid:
+        return None
+    
+    # === GRADE ===
+    # Grade A: FVG presente e coerente con direzione
+    # Grade B: nessun FVG o FVG non coerente
+    grade = "A" if (fvg is not None and fvg["dir"] == disp_dir) else "B"
+    
+    # === DISPLACEMENT VALIDO ===
+    return {
+        "dir": disp_dir,
+        "bos_level": bos_level,
+        "impulse_ok": impulse_ok,
+        "body_ok": body_ok,
+        "candle_range": candle_range,
+        "body": body,
+        "fvg": fvg,
+        "grade": grade
+    }
+
+
 def check_entry_signal(bias: str, df_ltf: pd.DataFrame) -> Optional[str]:
     """
     Controlla segnale di entrata su LTF basato su BIAS HTF
@@ -689,6 +798,43 @@ def main():
                                 print(f"    Wick Ratio: {sweep_detected['wick_ratio']:.2f}x")
                                 print(f"    Pool Distance: ${sweep_detected['pool_distance']:,.2f}")
                     
+                    # 3. DETECT DISPLACEMENT su HTF (STEP 3)
+                    displacement_detected = None
+                    if sweep_detected and bias != "NONE" and pool_high and pool_low:
+                        # Dopo sweep, cerchiamo displacement nelle barre successive
+                        # Per semplicità, controlliamo l'ultima candela
+                        # (in futuro: loop sulle ultime N barre dopo sweep)
+                        
+                        if current_atr > 0 and len(df_htf) >= 3:
+                            # Prendi ultima candela HTF (i)
+                            last_candle = df_htf.iloc[-1]
+                            o = float(last_candle["open"])
+                            h = float(last_candle["high"])
+                            l = float(last_candle["low"])
+                            c = float(last_candle["close"])
+                            
+                            # Prendi candela i-2 per FVG
+                            candle_i_2 = df_htf.iloc[-3]
+                            h_i_2 = float(candle_i_2["high"])
+                            l_i_2 = float(candle_i_2["low"])
+                            
+                            # Detect displacement
+                            displacement_detected = detect_displacement_m15(
+                                bias, o, h, l, c, current_atr,
+                                pool_high, pool_low,
+                                h_i_2, l_i_2
+                            )
+                            
+                            if displacement_detected:
+                                print(f"  [DISPLACEMENT DETECTED!] Direction: {displacement_detected['dir']}")
+                                print(f"    BOS Level: ${displacement_detected['bos_level']:,.2f}")
+                                print(f"    Grade: {displacement_detected['grade']}")
+                                print(f"    Impulse: {'✓' if displacement_detected['impulse_ok'] else '✗'}")
+                                print(f"    Body Dom: {'✓' if displacement_detected['body_ok'] else '✗'}")
+                                if displacement_detected['fvg']:
+                                    fvg = displacement_detected['fvg']
+                                    print(f"    FVG {fvg['dir']}: ${fvg['low']:,.2f} - ${fvg['high']:,.2f}")
+                    
                     # Controlla posizione esistente
                     position = account.get_position(symbol)
                     
@@ -699,19 +845,19 @@ def main():
                             account.close_position(symbol, current_price, exit_reason)
                     else:
                         # Controlla entry (solo se sotto il limite di posizioni)
-                        # Per ora usiamo solo BIAS, nel prossimo step useremo SWEEP
                         if len(account.positions) < CONFIG["MAX_POSITIONS"]:
-                            # Entry basato su SWEEP detection (se presente)
+                            # Entry basato su SWEEP + DISPLACEMENT (STEP 2 + 3)
                             signal = None
-                            if sweep_detected:
-                                # Se c'è sweep valido, entry nella direzione del bias
-                                if bias == "UP":
+                            if sweep_detected and displacement_detected:
+                                # Se c'è sweep E displacement validi, entry nella direzione del bias
+                                if bias == "UP" and displacement_detected['dir'] == "UP":
                                     signal = "LONG"
-                                elif bias == "DOWN":
+                                elif bias == "DOWN" and displacement_detected['dir'] == "DOWN":
                                     signal = "SHORT"
                             
                             if signal:
-                                print(f"  [SIGNAL] {signal} detected after SWEEP!")
+                                print(f"  [SIGNAL] {signal} detected after SWEEP + DISPLACEMENT!")
+                                print(f"    Displacement Grade: {displacement_detected['grade']}")
                                 
                                 # Calcola size basato sul risk management
                                 risk_amount = account.get_balance() * CONFIG["RISK_PER_TRADE"]

@@ -31,9 +31,23 @@ Identifica liquidity grab coerente con il bias:
   - Violazione troppo piccola
   - Sweep opposto al bias
 
-### STEP 3-5: In arrivo 🚧
-- **STEP 3**: Displacement detection
-- **STEP 4**: Retrace logic (Order Blocks / Fair Value Gaps)
+### STEP 3: DISPLACEMENT Detection ✅
+Rileva cambio di regime dopo sweep (M15):
+- **Break of Structure (BOS)**: 
+  - UP: close > swing_high + (ATR * 0.02)
+  - DOWN: close < swing_low - (ATR * 0.02)
+- **Impulso anomalo**: candle_range >= ATR * 0.80
+- **Body dominance**: body >= range * 0.55
+- **FVG (Fair Value Gap)**: Pattern 3 candele
+  - UP: low[i] > high[i-2]
+  - DOWN: high[i] < low[i-2]
+- **Grading**:
+  - Grade A: Displacement + FVG coerente
+  - Grade B: Displacement senza FVG
+- **Output**: dir, bos_level, fvg, grade
+
+### STEP 4-5: In arrivo 🚧
+- **STEP 4**: Retrace logic (Order Blocks)
 - **STEP 5**: Confirmation e Entry
 
 ## 🚀 Utilizzo
@@ -76,11 +90,20 @@ CONFIG = {
 "SWEEP_POOL_SIGNIFICANCE": 0.5,   # Pool distante > ATR * 0.5
 ```
 
+### Parametri Displacement Detection
+```python
+"DISPLACEMENT_BOS_BUFFER": 0.02,    # BOS buffer = ATR * 0.02
+"DISPLACEMENT_IMPULSE_MULT": 0.80,  # Impulso = range >= ATR * 0.80
+"DISPLACEMENT_BODY_RATIO": 0.55,    # Body dominance >= 55%
+"MAX_BARS_AFTER_SWEEP": 6,          # Timeout dopo sweep
+```
+
 ## 📈 Output
 
 Il bot stampa in tempo reale:
 - **BIAS HTF**: Direzione determinata su 15m
 - **SWEEP Detection**: Quando rileva liquidity grab
+- **DISPLACEMENT Detection**: Cambio regime con grade A/B
 - **Posizioni**: Apertura/chiusura trades
 - **Performance**: Win rate, ROI, PnL
 
@@ -137,6 +160,7 @@ Per trading reale, consulta sempre un professionista e comprendi i rischi del tr
 
 ## 📝 Versioni
 
+- **v3.0** - STEP 3: Displacement Detection implementato
 - **v2.0** - STEP 2: Sweep Detection implementato
 - **v1.0** - STEP 1: Bias Detection implementato
 - **v0.1** - Struttura base e paper account
@@ -147,4 +171,4 @@ Sviluppato step-by-step seguendo la metodologia ICT.
 
 ---
 
-**Status**: ✅ STEP 1 & 2 completati | 🚧 STEP 3-5 in sviluppo
+**Status**: ✅ STEP 1, 2 & 3 completati | 🚧 STEP 4-5 in sviluppo
