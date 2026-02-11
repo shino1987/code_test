@@ -28,7 +28,23 @@ CONFIG = {
     
     # Exchange e Mercati
     "EXCHANGE": "binance",
-    "SYMBOLS": ["BTC/USDC", "ETH/USDC", "BNB/USDC"],  # Coppie USDC alta liquidità
+    "SYMBOLS": [
+        # Top coppie USDC per liquidità e market cap
+        "BTC/USDC",   # Bitcoin
+        "ETH/USDC",   # Ethereum
+        "BNB/USDC",   # Binance Coin
+        "SOL/USDC",   # Solana
+        "XRP/USDC",   # Ripple
+        "ADA/USDC",   # Cardano
+        "DOGE/USDC",  # Dogecoin
+        "AVAX/USDC",  # Avalanche
+        "DOT/USDC",   # Polkadot
+        "MATIC/USDC", # Polygon
+        "LTC/USDC",   # Litecoin
+        "LINK/USDC",  # Chainlink
+        "UNI/USDC",   # Uniswap
+        "ATOM/USDC",  # Cosmos
+    ],  # 14 coppie USDC alta liquidità
     
     # API Keys (per LIVE mode)
     "API_KEY": "",  # Inserire API key Binance per live trading
