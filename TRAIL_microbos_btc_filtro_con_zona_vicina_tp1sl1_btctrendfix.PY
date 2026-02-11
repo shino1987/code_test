@@ -130,6 +130,18 @@ FVG_MIN_SIZE_PCT = 0.00010
 # Buffer strutturale SL (piccolo margine oltre swing/OB)
 STRUCT_SL_BUFFER_PCT = 0.00020  # 0.02%
 
+# Entry configuration (M5)
+MAX_ENTRY_BARS = 6               # Max bars M5 to wait for entry fill
+ENTRY_RETRACE_PCT = 0.50         # 50% retrace of confirm candle
+
+# State constants
+STATE_WAIT_BIAS = "WAIT_BIAS"
+STATE_WAIT_SWEEP = "WAIT_SWEEP"
+STATE_WAIT_DISPLACEMENT = "WAIT_DISPLACEMENT"
+STATE_WAIT_RETRACE = "WAIT_RETRACE"
+STATE_WAIT_CONFIRM = "WAIT_CONFIRM"
+STATE_VALID_SETUP = "VALID_SETUP"
+
 pending = {}
 positions = {}
 
@@ -1133,6 +1145,51 @@ def place_close_market(symbol: str, side: str, amount: float):
     params["side"] = "SELL" if side == "LONG" else "BUY"
     return ex.sapiPostMarginOrder(params)
 
+# ===================== ENTRY LOGIC =====================
+def generate_entry(disp_dir: str, confirm_high: float, confirm_low: float,
+                   current_high: float, current_low: float, current_close: float,
+                   bars_since_confirm: int) -> dict:
+    """
+    Generate entry logic after M5 confirmation
+    
+    Entry rules:
+    - LONG: entry at 50% of confirm candle (confirm_low + range * 0.50)
+    - SHORT: entry at 50% of confirm candle (confirm_high - range * 0.50)
+    - Must fill within MAX_ENTRY_BARS (6 bars M5)
+    
+    Returns dict with status and entry info
+    """
+    # Time decay check
+    if bars_since_confirm > MAX_ENTRY_BARS:
+        return {"status": "EXPIRED"}  # Reset to WAIT_SWEEP
+    
+    confirm_range = confirm_high - confirm_low
+    if confirm_range <= 0:
+        return {"status": "INVALID"}
+    
+    # Calculate entry price (50% retrace of confirm candle)
+    if disp_dir == "UP":
+        entry_price = confirm_low + confirm_range * ENTRY_RETRACE_PCT
+        side = "LONG"
+        # Check if current candle touches entry zone
+        entry_filled = current_low <= entry_price <= current_high
+    else:
+        entry_price = confirm_high - confirm_range * ENTRY_RETRACE_PCT
+        side = "SHORT"
+        # Check if current candle touches entry zone
+        entry_filled = current_low <= entry_price <= current_high
+    
+    if not entry_filled:
+        return {"status": "WAIT"}  # Stay in VALID_SETUP, wait for fill
+    
+    return {
+        "status": "FILLED",
+        "side": side,
+        "entry_price": entry_price,
+        "confirm_high": confirm_high,
+        "confirm_low": confirm_low,
+    }
+
 # ===================== OPEN/CLOSE =====================
 def open_position(symbol, side, entry_ref, sl_price, sl_type, tp_price, note=""):
     if len(positions) >= MAX_OPEN_POS:
@@ -1319,27 +1376,27 @@ while True:
 
                 # init pending
                 if symbol not in pending or pending[symbol].get("side") != side:
-                    pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                    pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
 
                 p = pending[symbol]
 
                 # WAIT_SWEEP
-                if p["state"] == "WAIT_SWEEP":
+                if p["state"] == STATE_WAIT_SWEEP:
                     if side == "LONG":
                         sw = pools_5m["swing_low"]
                         if (last["l"] < (sw - buffer)) and (last["c"] > sw):
-                            p["state"] = "WAIT_DISPLACEMENT"
+                            p["state"] = STATE_WAIT_DISPLACEMENT
                         else:
                             reasons["no_sweep"] += 1
                     else:
                         sw = pools_5m["swing_high"]
                         if (last["h"] > (sw + buffer)) and (last["c"] < sw):
-                            p["state"] = "WAIT_DISPLACEMENT"
+                            p["state"] = STATE_WAIT_DISPLACEMENT
                         else:
                             reasons["no_sweep"] += 1
 
                 # WAIT_DISPLACEMENT
-                elif p["state"] == "WAIT_DISPLACEMENT":
+                elif p["state"] == STATE_WAIT_DISPLACEMENT:
                     ar = avg_range(df, AVG_RANGE_LEN)
                     rng_ok = (last["range"] >= DISP_RANGE_MULT * ar) if ar > 0 else False
                     body_ok = (last["body_ratio"] >= DISP_BODY_RATIO)
@@ -1357,12 +1414,12 @@ while True:
                         reasons["no_fvg_ob"] += 1
                         continue
 
-                    p["state"] = "WAIT_RETRACE"
+                    p["state"] = STATE_WAIT_RETRACE
                     p["fvg"] = fvg
                     p["ob"] = ob
 
                 # WAIT_RETRACE
-                elif p["state"] == "WAIT_RETRACE":
+                elif p["state"] == STATE_WAIT_RETRACE:
                     zones = []
                     if p.get("ob"):
                         zones.append(("OB", p["ob"]))
@@ -1379,15 +1436,15 @@ while True:
                         reasons["no_retrace_touch"] += 1
                         continue
 
-                    p["state"] = "WAIT_CONFIRM"
+                    p["state"] = STATE_WAIT_CONFIRM
                     p["touch_name"], p["touch_zone"] = touched
 
                 # WAIT_CONFIRM
-                elif p["state"] == "WAIT_CONFIRM":
+                elif p["state"] == STATE_WAIT_CONFIRM:
                     z = p.get("touch_zone")
                     if not z:
                         reasons["confirm_missing_zone"] += 1
-                        pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                        pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
                         continue
 
                     df_sl = fetch_df(symbol, SL_TF, LOOKBACK_SL)
@@ -1395,7 +1452,7 @@ while True:
                     # ✅ CHECK anti-blocco "silenzioso" (se il 15m non arriva, non provo a calcolare SL)
                     if df_sl.empty or len(df_sl) < 80:
                         reasons["sl15_fetch_empty"] += 1
-                        pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                        pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
                         continue
 
                     
@@ -1403,12 +1460,10 @@ while True:
                     if side == "LONG":
                         if last["c"] < float(z["low"]):
                             reasons["confirm_invalidated"] += 1
-                            pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                            pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
                             continue
 
                         if last["bull"] and last["c"] > float(z["high"]):
-                            entry = last["c"]
-
                             # ✅ BOS obbligatorio SOLO se mercato laterale (5m)
                             lateral = is_lateral_market_5m(df)
                             if lateral:
@@ -1423,38 +1478,44 @@ while True:
                                     reasons["btc_conflict"] += 1
                                     if DEBUG_TERMINAL:
                                         print(f"[{symbol}] SKIP LONG (BTC conflict): {why}", flush=True)
-                                    pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                                    pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
                                     continue
 
-
-                            # TP iniziale = TP0 (da TP_LADDER_PCTS[0])
+                            # ✅ TP room check
                             tp0_pct = TP_LADDER_PCTS[0]
+                            entry = last["c"]
                             tp = entry * (1.0 + tp0_pct)
                             if not has_room_to_tp(entry, "LONG", tp0_pct, df_sl):
-
                                 reasons["no_room_to_tp"] += 1
-                                pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                                pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
                                 continue
 
-                            # SL su ultimo OB 15m + CAP 0.65%
-                            sl = entry * (1.0 - SL_FIXED_PCT)
-                            sl_type = "FIXED_1%"
-
-                            note = f"ICT LONG | {p.get('touch_name')} confirm | TP0={tp0_pct*100:.2f}% | SL FIXED 1.00%"
-                            open_position(symbol, "LONG", entry, sl, sl_type, tp, note)
-                            del pending[symbol]
+                            # ✅ CONFIRMED! Transition to VALID_SETUP
+                            p["state"] = STATE_VALID_SETUP
+                            p["confirm_bar_index"] = len(df) - 1
+                            p["bars_since_confirm"] = 0
+                            p["confirm_high"] = last["h"]
+                            p["confirm_low"] = last["l"]
+                            p["displacement"] = {"dir": "UP"}
+                            
+                            if DEBUG_TERMINAL:
+                                print(
+                                    f"[{symbol}] CONFIRMED! LONG setup "
+                                    f"confirm_candle=[{last['l']:.6f}-{last['h']:.6f}] "
+                                    f"→ VALID_SETUP (waiting for 50% retrace entry)",
+                                    flush=True
+                                )
+                            reasons["confirmed"] += 1
                         else:
                             reasons["no_confirm_candle"] += 1
 
                     else:
                         if last["c"] > float(z["high"]):
                             reasons["confirm_invalidated"] += 1
-                            pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                            pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
                             continue
 
                         if last["bear"] and last["c"] < float(z["low"]):
-                            entry = last["c"]
-
                             # ✅ BOS obbligatorio SOLO se mercato laterale (5m)
                             lateral = is_lateral_market_5m(df)
                             if lateral:
@@ -1470,28 +1531,127 @@ while True:
                                     reasons["btc_conflict"] += 1
                                     if DEBUG_TERMINAL:
                                         print(f"[{symbol}] SKIP SHORT (BTC conflict): {why}", flush=True)
-                                    pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                                    pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
                                     continue
 
-
+                            # ✅ TP room check
                             tp0_pct = TP_LADDER_PCTS[0]
+                            entry = last["c"]
                             tp = entry * (1.0 - tp0_pct)
                             if not has_room_to_tp(entry, "SHORT", tp0_pct, df_sl):
-
-
                                 reasons["no_room_to_tp"] += 1
-                                pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                                pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
                                 continue
 
-                            sl = entry * (1.0 + SL_FIXED_PCT)
-                            sl_type = "FIXED_1%"
-
-                            note = f"ICT SHORT | {p.get('touch_name')} confirm | TP0={tp0_pct*100:.2f}% | SL FIXED 1.00%"
-
-                            open_position(symbol, "SHORT", entry, sl, sl_type, tp, note)
-                            del pending[symbol]
+                            # ✅ CONFIRMED! Transition to VALID_SETUP
+                            p["state"] = STATE_VALID_SETUP
+                            p["confirm_bar_index"] = len(df) - 1
+                            p["bars_since_confirm"] = 0
+                            p["confirm_high"] = last["h"]
+                            p["confirm_low"] = last["l"]
+                            p["displacement"] = {"dir": "DOWN"}
+                            
+                            if DEBUG_TERMINAL:
+                                print(
+                                    f"[{symbol}] CONFIRMED! SHORT setup "
+                                    f"confirm_candle=[{last['l']:.6f}-{last['h']:.6f}] "
+                                    f"→ VALID_SETUP (waiting for 50% retrace entry)",
+                                    flush=True
+                                )
+                            reasons["confirmed"] += 1
                         else:
                             reasons["no_confirm_candle"] += 1
+
+                # VALID_SETUP
+                elif p["state"] == STATE_VALID_SETUP:
+                    # Get displacement data
+                    displacement = p.get("displacement")
+                    
+                    if not displacement:
+                        # Missing data, reset
+                        if DEBUG_TERMINAL:
+                            print(f"[{symbol}] MISSING DISPLACEMENT DATA → RESET to WAIT_SWEEP", flush=True)
+                        pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
+                        reasons["missing_displacement_data"] += 1
+                        continue
+                    
+                    # Update bars since confirm
+                    p["bars_since_confirm"] = len(df) - 1 - p.get("confirm_bar_index", 0)
+                    
+                    # Get current candle (closed candle)
+                    current_candle = last
+                    
+                    # Generate entry
+                    entry = generate_entry(
+                        disp_dir=displacement["dir"],
+                        confirm_high=p["confirm_high"],
+                        confirm_low=p["confirm_low"],
+                        current_high=current_candle["h"],
+                        current_low=current_candle["l"],
+                        current_close=current_candle["c"],
+                        bars_since_confirm=p["bars_since_confirm"],
+                    )
+                    
+                    status = entry.get("status")
+                    
+                    if status == "FILLED":
+                        # Entry filled! Need to calculate SL/TP and open position
+                        # Fetch SL dataframe
+                        df_sl = fetch_df(symbol, SL_TF, LOOKBACK_SL)
+                        if df_sl.empty or len(df_sl) < 80:
+                            reasons["sl15_fetch_empty"] += 1
+                            pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
+                            continue
+                        
+                        entry_price = entry["entry_price"]
+                        entry_side = entry["side"]
+                        
+                        # Calculate TP
+                        tp0_pct = TP_LADDER_PCTS[0]
+                        if entry_side == "LONG":
+                            tp_price = entry_price * (1.0 + tp0_pct)
+                        else:
+                            tp_price = entry_price * (1.0 - tp0_pct)
+                        
+                        # Calculate SL (Fixed 1%)
+                        if entry_side == "LONG":
+                            sl_price = entry_price * (1.0 - SL_FIXED_PCT)
+                        else:
+                            sl_price = entry_price * (1.0 + SL_FIXED_PCT)
+                        sl_type = "FIXED_1%"
+                        
+                        # Debug log
+                        if DEBUG_TERMINAL:
+                            print(
+                                f"[{symbol}] ENTRY FILLED! "
+                                f"side={entry_side} "
+                                f"entry_price={entry_price:.6f} "
+                                f"confirm_range=[{entry['confirm_low']:.6f}-{entry['confirm_high']:.6f}] "
+                                f"bars_since_confirm={p['bars_since_confirm']} "
+                                f"→ OPENING POSITION",
+                                flush=True
+                            )
+                        reasons["entry_filled"] += 1
+                        
+                        # Open position
+                        note = f"ICT {entry_side} | {p.get('touch_name')} confirm + entry retrace | TP0={tp0_pct*100:.2f}% | SL FIXED 1.00%"
+                        open_position(symbol, entry_side, entry_price, sl_price, sl_type, tp_price, note)
+                        del pending[symbol]
+                    
+                    elif status == "EXPIRED":
+                        if DEBUG_TERMINAL:
+                            print(f"[{symbol}] ENTRY EXPIRED ({p['bars_since_confirm']} bars > {MAX_ENTRY_BARS}) → RESET to WAIT_SWEEP", flush=True)
+                        pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
+                        reasons["entry_expired"] += 1
+                    
+                    elif status == "WAIT":
+                        reasons["entry_waiting"] += 1
+                    
+                    else:
+                        if DEBUG_TERMINAL:
+                            print(f"[{symbol}] ENTRY INVALID STATUS={status} → RESET to WAIT_SWEEP", flush=True)
+                        pending[symbol] = {"state": STATE_WAIT_SWEEP, "side": side}
+                        reasons["entry_invalid_status"] += 1
 
             except Exception as sym_err:
                 reasons["symbol_error"] += 1
