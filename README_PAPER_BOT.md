@@ -89,6 +89,43 @@ Calcolo entry price dopo confirmation:
 
 **Entry finale**: Richiede tutti i 5 STEP coerenti + Entry Logic Ready
 
+## 🛡️ Risk Management
+
+### Stop Loss Strutturale
+Lo Stop Loss è basato sull'**invalidazione strutturale** del setup:
+
+**LONG:**
+```python
+SL = min(sweep_extreme, retrace_low) - (ATR_M15 × 0.05)
+```
+- SL sotto il punto più basso tra sweep e retrace
+- Buffer ATR per evitare stop out prematuri
+- **SL è FISSO**, non si muove mai
+
+**SHORT:**
+```python
+SL = max(sweep_extreme, retrace_high) + (ATR_M15 × 0.05)
+```
+- SL sopra il punto più alto tra sweep e retrace
+- **SL è FISSO**, non si muove mai
+
+### Take Profit a 2R
+Il Take Profit è calcolato con **risk multiple fisso a 2R**:
+
+**Formula:**
+```python
+R = |entry - SL|  # Risk
+TP = entry + 2R   # LONG
+TP = entry - 2R   # SHORT
+```
+
+**Vantaggi 2R:**
+- ✅ Win rate 40% → quasi break even
+- ✅ Win rate 50% → equity cresce
+- ✅ Matematicamente solido
+- ✅ Non dipende da interpretazioni
+- ✅ Risk/Reward ratio sempre 1:2
+
 ## 🚀 Utilizzo
 
 ### Installazione dipendenze
@@ -160,6 +197,13 @@ CONFIG = {
 "ENTRY_RETRACE_PCT": 0.50,          # Entry al 50% della candela confirm
 ```
 
+### Parametri Risk Management
+```python
+"RISK_PER_TRADE": 0.02,             # 2% del capitale per trade
+"SL_ATR_BUFFER": 0.05,              # Stop Loss buffer = ATR M15 * 0.05
+"TP_RISK_MULTIPLE": 2.0,            # Take Profit = 2R (2x risk)
+```
+
 ## 📈 Output
 
 Il bot stampa in tempo reale:
@@ -225,6 +269,7 @@ Per trading reale, consulta sempre un professionista e comprendi i rischi del tr
 
 ## 📝 Versioni
 
+- **v5.2** - Risk Management: SL strutturale e TP a 2R implementati
 - **v5.1** - Entry Logic: Entry al 50% della candela confirm implementato
 - **v5.0** - STEP 5: Confirmation Detection implementato - **STRATEGIA ICT COMPLETA** 🎉
 - **v4.0** - STEP 4: Retrace Detection implementato

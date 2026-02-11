@@ -72,10 +72,10 @@ CONFIG = {
     "MAX_ENTRY_BARS": 6,                # Max barre M5 per entry dopo confirm
     "ENTRY_RETRACE_PCT": 0.50,          # Entry al 50% della candela confirm
     
-    # Risk Management
-    "RISK_PER_TRADE": 0.02,  # 2% del capitale per trade
-    "STOP_LOSS_PCT": 0.015,  # Stop Loss al 1.5%
-    "TAKE_PROFIT_PCT": 0.03, # Take Profit al 3%
+    # Risk Management (Structural)
+    "RISK_PER_TRADE": 0.02,             # 2% del capitale per trade
+    "SL_ATR_BUFFER": 0.05,              # Stop Loss buffer = ATR M15 * 0.05
+    "TP_RISK_MULTIPLE": 2.0,            # Take Profit = 2R (2x risk)
     
     # Limiti
     "MAX_POSITIONS": 2,  # Massimo 2 posizioni aperte contemporaneamente
@@ -991,6 +991,80 @@ def generate_entry(disp_dir: str, confirm_high: float, confirm_low: float,
     }
 
 
+# ===================== RISK MANAGEMENT (STRUCTURAL SL & 2R TP) =====================
+def calculate_structural_sl(side: str, sweep_extreme: float, 
+                            retrace_low: float, retrace_high: float,
+                            atr_m15: float) -> float:
+    """
+    Calcola Stop Loss strutturale basato su invalidazione mercato
+    
+    Parametri:
+    - side: "LONG" o "SHORT"
+    - sweep_extreme: prezzo estremo dello sweep
+    - retrace_low: low della zona retrace
+    - retrace_high: high della zona retrace
+    - atr_m15: ATR su M15
+    
+    Ritorna: Stop Loss price
+    
+    LOGICA SL STRUTTURALE:
+    - LONG: SL sotto il minimo tra sweep e retrace (con buffer ATR)
+    - SHORT: SL sopra il massimo tra sweep e retrace (con buffer ATR)
+    - SL è FISSO, non si muove mai
+    """
+    
+    sl_buffer = atr_m15 * CONFIG["SL_ATR_BUFFER"]
+    
+    if side == "LONG":
+        # LONG: SL = min(sweep_extreme, retrace_low) - buffer
+        sl_base = min(sweep_extreme, retrace_low)
+        stop_loss = sl_base - sl_buffer
+    elif side == "SHORT":
+        # SHORT: SL = max(sweep_extreme, retrace_high) + buffer
+        sl_base = max(sweep_extreme, retrace_high)
+        stop_loss = sl_base + sl_buffer
+    else:
+        raise ValueError(f"Side invalido: {side}")
+    
+    return stop_loss
+
+
+def calculate_tp_from_risk(side: str, entry_price: float, 
+                           stop_loss: float) -> float:
+    """
+    Calcola Take Profit basato su risk multiple (2R)
+    
+    Parametri:
+    - side: "LONG" o "SHORT"
+    - entry_price: prezzo di entry
+    - stop_loss: stop loss price
+    
+    Ritorna: Take Profit price
+    
+    LOGICA TP a 2R:
+    - R = distanza tra entry e SL
+    - TP = entry + (2 * R) per LONG
+    - TP = entry - (2 * R) per SHORT
+    """
+    
+    # Calcola R (risk)
+    risk = abs(entry_price - stop_loss)
+    
+    # Calcola TP basato su risk multiple
+    tp_multiple = CONFIG["TP_RISK_MULTIPLE"]
+    
+    if side == "LONG":
+        # LONG: TP sopra entry
+        take_profit = entry_price + (tp_multiple * risk)
+    elif side == "SHORT":
+        # SHORT: TP sotto entry
+        take_profit = entry_price - (tp_multiple * risk)
+    else:
+        raise ValueError(f"Side invalido: {side}")
+    
+    return take_profit
+
+
 def check_entry_signal(bias: str, df_ltf: pd.DataFrame) -> Optional[str]:
     """
     Controlla segnale di entrata su LTF basato su BIAS HTF
@@ -1324,17 +1398,43 @@ def main():
                                 # Usa entry_price per la posizione
                                 entry_price = entry_data['entry_price']
                                 
-                                # Calcola size basato sul risk management
-                                risk_amount = account.get_balance() * CONFIG["RISK_PER_TRADE"]
-                                position_size = risk_amount / entry_price
+                                # Calcola SL strutturale
+                                sweep_extreme = sweep_detected['extreme']
+                                retrace_zone_low = retrace_detected['zone_low']
+                                retrace_zone_high = retrace_detected['zone_high']
                                 
-                                # Calcola SL e TP basati su entry_price
-                                if signal == "LONG":
-                                    stop_loss = entry_price * (1 - CONFIG["STOP_LOSS_PCT"])
-                                    take_profit = entry_price * (1 + CONFIG["TAKE_PROFIT_PCT"])
-                                else:  # SHORT
-                                    stop_loss = entry_price * (1 + CONFIG["STOP_LOSS_PCT"])
-                                    take_profit = entry_price * (1 - CONFIG["TAKE_PROFIT_PCT"])
+                                stop_loss = calculate_structural_sl(
+                                    signal,
+                                    sweep_extreme,
+                                    retrace_zone_low,
+                                    retrace_zone_high,
+                                    current_atr
+                                )
+                                
+                                # Calcola TP a 2R
+                                take_profit = calculate_tp_from_risk(
+                                    signal,
+                                    entry_price,
+                                    stop_loss
+                                )
+                                
+                                # Calcola position size basato su risk
+                                risk_amount = account.get_balance() * CONFIG["RISK_PER_TRADE"]
+                                risk_per_unit = abs(entry_price - stop_loss)
+                                position_size = risk_amount / risk_per_unit if risk_per_unit > 0 else 0
+                                
+                                # Log SL/TP details
+                                risk = abs(entry_price - stop_loss)
+                                reward = abs(take_profit - entry_price)
+                                rr_ratio = reward / risk if risk > 0 else 0
+                                
+                                print(f"  💰 RISK MANAGEMENT:")
+                                print(f"     Stop Loss: ${stop_loss:,.2f}")
+                                print(f"     Take Profit: ${take_profit:,.2f}")
+                                print(f"     Risk (R): ${risk:,.2f}")
+                                print(f"     Reward: ${reward:,.2f}")
+                                print(f"     R:R Ratio: 1:{rr_ratio:.2f}")
+                                print(f"     Position Size: {position_size:.6f} {symbol.split('/')[0]}\n")
                                 
                                 # Apri posizione
                                 account.open_position(
