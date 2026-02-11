@@ -61,6 +61,24 @@ python ict_bot_minimal.py
 #### Testing
 - **[test_ict_bot.py](test_ict_bot.py)** - Unit tests
 
+#### Files & Data
+- **[FILE_LOCATIONS.md](FILE_LOCATIONS.md)** - 📁 Where files are saved (Dove scaricare i file)
+
+### Where Are Files Saved? 📁
+
+**Trade Log:** `ict_trades.csv` is saved in the **same folder** as `ict_bot_minimal.py`
+
+**How to find it:**
+- **Windows:** Look in the folder where you ran the bot, or use `dir ict_trades.csv`
+- **Linux/Mac:** Use `ls ict_trades.csv` or `pwd` to see current directory
+
+**Full details:** See [FILE_LOCATIONS.md](FILE_LOCATIONS.md) for complete guide in Italian and English
+
+**Opening the CSV:**
+- Microsoft Excel: File → Open → Select `ict_trades.csv`
+- Google Sheets: Import the file
+- Text editor: Double-click the file
+
 ### Files
 
 - `ict_bot_minimal.py` - Main bot implementation (paper + live)

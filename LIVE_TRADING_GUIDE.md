@@ -219,10 +219,23 @@ Bias TF: 30m | Entry TF: 5m
 
 All trades (paper and live) are logged to `ict_trades.csv`:
 
+**File Location:** `ict_trades.csv` is saved in the **same directory** where you run the bot.
+
+**How to find it:**
+- Windows: `dir ict_trades.csv` or look in the bot folder
+- Linux/Mac: `ls ict_trades.csv` or `pwd` to see current directory
+- See [FILE_LOCATIONS.md](FILE_LOCATIONS.md) for complete guide
+
+**CSV Format:**
 ```csv
 timestamp,symbol,side,entry_price,sl_price,tp1_price,tp2_price,exit_price,pnl_gross_pct,pnl_net_pct,duration_min,exit_reason
 2026-02-11 15:30:00,BTC/USDT,LONG,41523.45,40479.75,42100.00,42650.00,42100.00,1.39,1.19,45.3,TP1_HIT
 ```
+
+**Opening the file:**
+- Excel: File → Open → `ict_trades.csv`
+- Google Sheets: File → Import
+- Text editor: Double-click the file
 
 ## Position Limits
 

@@ -85,7 +85,14 @@ def init_csv():
                 'tp1_price', 'tp2_price', 'exit_price', 'pnl_gross_pct', 
                 'pnl_net_pct', 'duration_min', 'exit_reason'
             ])
+        abs_path = os.path.abspath(CSV_PATH)
         log(f"CSV file created: {CSV_PATH}")
+        log(f"📁 Full path: {abs_path}")
+        log(f"💡 You can open this file with Excel or any spreadsheet program")
+    else:
+        abs_path = os.path.abspath(CSV_PATH)
+        log(f"CSV file exists: {CSV_PATH}")
+        log(f"📁 Full path: {abs_path}")
 
 def log_trade_to_csv(trade_data: dict):
     """Append trade to CSV file"""
