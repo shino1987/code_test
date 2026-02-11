@@ -43,7 +43,7 @@ tail -f ict_trades.csv
 |------------|--------|----------------|
 | Bias 30m (BOS/CHoCH) | ✅ | `detect_bias()` function |
 | Entry 5m (SWEEP→DISPLACEMENT→RETRACE→CONFIRM) | ✅ | 4-state machine in `scan_symbol()` |
-| Structural SL | ✅ | Below/above swing + 0.02% buffer |
+| Structural SL | ✅ | Below/above swing + 0.05% buffer |
 | Structural TP1/TP2 | ✅ | Internal/external liquidity (swings) |
 | Exit Logic | ✅ | SL→close, TP1→BE, TP2→close |
 | Paper Trading ONLY | ✅ | `LIVE_TRADING = False` |
@@ -78,7 +78,7 @@ LOOP_SEC = 30            # Check interval
 
 SWING_LR = 2             # Swing detection sensitivity
 SWEEP_BUFFER_PCT = 0.0002  # 0.02% sweep buffer
-STRUCT_SL_BUFFER_PCT = 0.0002  # 0.02% SL buffer
+STRUCT_SL_BUFFER_PCT = 0.0005  # 0.05% SL buffer
 
 SYMBOLS = [              # Trading pairs
     "BTC/USDT",

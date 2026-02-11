@@ -58,7 +58,7 @@ The bot uses a 4-state machine:
 
 **Stop Loss (SL)**:
 - Placed below sweep level for LONG (above for SHORT)
-- Includes 0.02% buffer beyond structural level
+- Includes 0.05% buffer beyond structural level
 - Minimum 0.3% distance enforced
 
 **Take Profit (TP)**:
@@ -97,7 +97,7 @@ LOOP_SEC = 30            # Main loop interval (seconds)
 
 SWING_LR = 2             # Left/Right bars for swing detection
 SWEEP_BUFFER_PCT = 0.0002  # 0.02% buffer for sweep detection
-STRUCT_SL_BUFFER_PCT = 0.0002  # 0.02% buffer beyond swing for SL
+STRUCT_SL_BUFFER_PCT = 0.0005  # 0.05% buffer beyond swing for SL
 
 SYMBOLS = [              # Symbols to trade
     "BTC/USDT",

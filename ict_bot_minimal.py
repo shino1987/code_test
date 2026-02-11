@@ -37,7 +37,7 @@ DISP_RANGE_MULT = 1.5    # Displacement must be > avg_range * mult
 DISP_BODY_RATIO = 0.6    # Body must be > 60% of range
 
 # Structural SL/TP
-STRUCT_SL_BUFFER_PCT = 0.0002  # 0.02% buffer beyond swing
+STRUCT_SL_BUFFER_PCT = 0.0005  # 0.05% buffer beyond swing
 MIN_SL_PCT = 0.003       # Minimum 0.3% SL
 
 # Paper Trading

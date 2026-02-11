@@ -49,8 +49,8 @@ REQUIREMENTS CHECKLIST
    └─ OPEN: Position opened at close price
 
 ✅ Structural Stop Loss
-   └─ LONG: Below swing_low + 0.02% buffer
-   └─ SHORT: Above swing_high + 0.02% buffer
+   └─ LONG: Below swing_low + 0.05% buffer
+   └─ SHORT: Above swing_high + 0.05% buffer
    └─ Minimum 0.3% distance enforced
 
 ✅ Structural Take Profit
@@ -150,7 +150,7 @@ Entry Thresholds:
 - SWEEP_BUFFER_PCT = 0.0002       (0.02% sweep buffer)
 - DISP_RANGE_MULT = 1.5           (Displacement multiplier)
 - DISP_BODY_RATIO = 0.6           (60% body requirement)
-- STRUCT_SL_BUFFER_PCT = 0.0002   (0.02% SL buffer)
+- STRUCT_SL_BUFFER_PCT = 0.0005   (0.05% SL buffer)
 
 Trading:
 - SYMBOLS = ["BTC/USDT", "ETH/USDT"]

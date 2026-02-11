@@ -20,7 +20,7 @@
 - ✅ Entry at current close price (intrabar, paper)
 
 #### 3. Structural Stop Loss & Take Profit
-- ✅ **SL**: Below swing_low (LONG) / Above swing_high (SHORT) + 0.02% buffer
+- ✅ **SL**: Below swing_low (LONG) / Above swing_high (SHORT) + 0.05% buffer
 - ✅ **TP1**: First swing ahead (internal liquidity)
 - ✅ **TP2**: Second/major swing ahead (external liquidity)
 - ✅ Structural levels based on actual market swings
@@ -81,7 +81,7 @@
 
 4. On CONFIRM:
    ✅ Entry = current close (paper)
-   ✅ SL = structural + 0.02% buffer
+   ✅ SL = structural + 0.05% buffer
    ✅ TP1/TP2 = swing levels ahead
 
 5. Position management:
