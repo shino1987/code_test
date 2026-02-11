@@ -139,6 +139,28 @@ HEARTBEAT_EVERY_LOOPS = 3
 PRINT_PENDING_SAMPLE = 8
 loop_count = 0
 
+# ===================== ENV VALIDATION =====================
+# Validate required environment variables at startup
+required_env_vars = {
+    "BINANCE_API_KEY": "Binance API key",
+    "BINANCE_API_SECRET": "Binance API secret",
+}
+
+missing_vars = []
+for var_name, var_desc in required_env_vars.items():
+    if not os.getenv(var_name):
+        missing_vars.append(f"{var_name} ({var_desc})")
+
+if missing_vars:
+    print("=" * 60, flush=True)
+    print("ERRORE: Variabili d'ambiente mancanti:", flush=True)
+    for var in missing_vars:
+        print(f"  - {var}", flush=True)
+    print("=" * 60, flush=True)
+    raise SystemExit(1)
+
+print("✓ Variabili d'ambiente validate", flush=True)
+
 # ===================== TELEGRAM =====================
 TG_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
@@ -222,6 +244,10 @@ def fetch_df(symbol: str, tf: str, limit: int) -> pd.DataFrame:
 
 # ===================== HELPERS =====================
 def find_swings(df: pd.DataFrame, lr: int = 2):
+    # Validate DataFrame has enough data
+    if df.empty or len(df) < (2 * lr + 1):
+        return [], []
+    
     highs = df["high"].astype(float).values
     lows = df["low"].astype(float).values
     swing_highs = []
@@ -855,7 +881,16 @@ def _find_last_displacement_idx_15m(df15: pd.DataFrame, side: str) -> int:
     return -1
 
 def structural_sl_from_last_ob_15m(entry: float, side: str, df15: pd.DataFrame):
+    # Validate inputs
+    if df15.empty:
+        print(f"[SL] Warning: Empty DataFrame for SL calculation", flush=True)
+        return None, None
+    
     entry = float(entry)
+    if entry <= 0:
+        print(f"[SL] Warning: Invalid entry price {entry}", flush=True)
+        return None, None
+    
     buf = entry * STRUCT_SL_BUFFER_PCT
 
     disp_idx = _find_last_displacement_idx_15m(df15, side)
@@ -1151,6 +1186,12 @@ def open_position(symbol, side, entry_ref, sl_price, sl_type, tp_price, note="")
         try:
             order, filled_qty = place_entry_market(symbol, side, float(entry_ref))
             amount = float(filled_qty)
+            
+            # Validate order was filled
+            if amount <= 0:
+                print(f"[{symbol}] ENTRY FAILED: Order not filled (executedQty={amount})", flush=True)
+                return
+            
             entry_order_id = order.get("orderId") or order.get("id")
             real_entry = get_real_entry_from_sapi_order(order, float(entry_ref))
 
