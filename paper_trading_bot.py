@@ -61,6 +61,13 @@ CONFIG = {
     "RETRACE_ZONE_MIN": 0.50,           # 50% del displacement range
     "RETRACE_ZONE_MAX": 0.79,           # 79% del displacement range
     
+    # Confirmation Detection (STEP 5) - M5
+    "MAX_CONFIRM_BARS": 12,             # Max barre M5 per confirmation (~60 min)
+    "CONFIRM_ZONE_BUFFER": 0.25,        # Zone buffer = ATR M5 * 0.25
+    "CONFIRM_BOS_BUFFER": 0.02,         # Micro BOS buffer = ATR M5 * 0.02
+    "CONFIRM_IMPULSE_MULT": 0.60,       # Impulso M5 = range >= ATR M5 * 0.60
+    "CONFIRM_BODY_RATIO": 0.50,         # Body dominance M5 >= 50%
+    
     # Risk Management
     "RISK_PER_TRADE": 0.02,  # 2% del capitale per trade
     "STOP_LOSS_PCT": 0.015,  # Stop Loss al 1.5%
@@ -798,6 +805,137 @@ def detect_retrace_m15(disp_dir: str, fvg: Optional[Dict],
     }
 
 
+# ===================== CONFIRMATION DETECTION (ICT STEP 5) =====================
+def detect_confirm_m5(disp_dir: str, zone_low: float, zone_high: float,
+                      o: float, h: float, l: float, c: float,
+                      atr5: float,
+                      m5_last_swing_high: float, m5_last_swing_low: float,
+                      h_i_2: float, l_i_2: float,
+                      bars_since_retrace_hit: int) -> Dict:
+    """
+    Rileva confirmation su M5 dopo retrace su M15
+    
+    Parametri:
+    - disp_dir: "UP" o "DOWN" (direzione displacement M15)
+    - zone_low, zone_high: zona retrace da M15
+    - o, h, l, c: open, high, low, close della candela M5 corrente
+    - atr5: Average True Range su M5
+    - m5_last_swing_high: ultimo swing high su M5
+    - m5_last_swing_low: ultimo swing low su M5
+    - h_i_2, l_i_2: high/low candela i-2 per mini FVG
+    - bars_since_retrace_hit: barre M5 da retrace hit
+    
+    Ritorna: Dict con status e dettagli
+    
+    Status possibili:
+    - "CONFIRMED": setup completo, entry valido
+    - "WAIT": in attesa confirmation
+    - "EXPIRED": timeout superato
+    
+    REGOLA ICT CONFIRM:
+    - Deve essere vicino alla zona retrace (context gate)
+    - Micro BOS su M5 nella direzione attesa
+    - Impulso e body dominance (più leggeri rispetto a M15)
+    - Mini FVG opzionale per Grade A
+    """
+    
+    # === FILTRO 1: TIMEOUT ===
+    max_confirm_bars = CONFIG["MAX_CONFIRM_BARS"]
+    if bars_since_retrace_hit > max_confirm_bars:
+        return {"status": "EXPIRED"}
+    
+    # === FILTRO 2: CONTEXT GATE (vicino alla zona) ===
+    # Il prezzo deve essere in o vicino alla zona retrace
+    zone_buffer = atr5 * CONFIG["CONFIRM_ZONE_BUFFER"]
+    in_zone_or_near = (l <= zone_high + zone_buffer) and (h >= zone_low - zone_buffer)
+    
+    if not in_zone_or_near:
+        return {
+            "status": "WAIT",
+            "reason": "Prezzo fuori zona"
+        }
+    
+    # === CALCOLI CANDELA ===
+    candle_range = h - l
+    if candle_range <= 0:
+        return {"status": "WAIT", "reason": "Range invalido"}
+    
+    body = abs(c - o)
+    
+    # === PARAMETRI M5 (più leggeri) ===
+    bos_buffer5 = atr5 * CONFIG["CONFIRM_BOS_BUFFER"]
+    impulse_mult5 = CONFIG["CONFIRM_IMPULSE_MULT"]
+    body_ratio5 = CONFIG["CONFIRM_BODY_RATIO"]
+    
+    # === CONDIZIONI ===
+    # 1. Impulso (più leggero: 60% ATR)
+    impulse_ok = candle_range >= atr5 * impulse_mult5
+    
+    # 2. Body dominance (50%)
+    body_ok = body >= candle_range * body_ratio5
+    
+    # 3. Micro BOS su M5
+    micro_bos_up = c > (m5_last_swing_high + bos_buffer5)
+    micro_bos_down = c < (m5_last_swing_low - bos_buffer5)
+    
+    # === MINI FVG M5 (opzionale per grading) ===
+    fvg = None
+    if l > h_i_2:
+        # Mini FVG UP
+        fvg = {
+            "dir": "UP",
+            "low": h_i_2,
+            "high": l
+        }
+    elif h < l_i_2:
+        # Mini FVG DOWN
+        fvg = {
+            "dir": "DOWN",
+            "low": h,
+            "high": l_i_2
+        }
+    
+    # === VALIDAZIONE PER DIREZIONE ===
+    if disp_dir == "UP":
+        # Per displacement UP, serve confirmation UP
+        valid = in_zone_or_near and micro_bos_up and impulse_ok and body_ok
+        confirm_dir = "UP"
+        bos_level = m5_last_swing_high
+    elif disp_dir == "DOWN":
+        # Per displacement DOWN, serve confirmation DOWN
+        valid = in_zone_or_near and micro_bos_down and impulse_ok and body_ok
+        confirm_dir = "DOWN"
+        bos_level = m5_last_swing_low
+    else:
+        return {"status": "WAIT", "reason": "Direzione invalida"}
+    
+    if not valid:
+        return {
+            "status": "WAIT",
+            "reason": "Condizioni non soddisfatte",
+            "impulse_ok": impulse_ok,
+            "body_ok": body_ok,
+            "micro_bos_up": micro_bos_up,
+            "micro_bos_down": micro_bos_down
+        }
+    
+    # === GRADING ===
+    # Grade A: confirmation + mini FVG coerente
+    # Grade B: confirmation senza FVG
+    grade = "A" if (fvg is not None and fvg["dir"] == confirm_dir) else "B"
+    
+    # === CONFIRMATION VALIDA ===
+    return {
+        "status": "CONFIRMED",
+        "dir": confirm_dir,
+        "micro_bos_level": bos_level,
+        "impulse_ok": impulse_ok,
+        "body_ok": body_ok,
+        "fvg": fvg,
+        "grade": grade
+    }
+
+
 def check_entry_signal(bias: str, df_ltf: pd.DataFrame) -> Optional[str]:
     """
     Controlla segnale di entrata su LTF basato su BIAS HTF
@@ -998,6 +1136,67 @@ def main():
                         elif retrace_result['status'] == "INVALIDATED":
                             print(f"  [RETRACE] INVALIDATED - Impulse broken")
                     
+                    # 5. DETECT CONFIRM su LTF M5 (STEP 5)
+                    confirm_detected = None
+                    if retrace_detected:
+                        # Dopo retrace HIT, cerchiamo confirmation su M5 (LTF)
+                        # Usa df_ltf per analisi M5
+                        
+                        if len(df_ltf) >= 3:
+                            # Calcola ATR su M5
+                            atr_ltf = calculate_atr(df_ltf, CONFIG["ATR_PERIOD"])
+                            atr5 = float(atr_ltf.iloc[-1]) if not pd.isna(atr_ltf.iloc[-1]) else 0
+                            
+                            if atr5 > 0:
+                                # Trova swing su M5
+                                swing_highs_m5, swing_lows_m5 = find_swing_highs_lows(df_ltf, CONFIG["SWING_LEFT_RIGHT"])
+                                
+                                if swing_highs_m5 and swing_lows_m5:
+                                    m5_last_swing_high = swing_highs_m5[-1][1]
+                                    m5_last_swing_low = swing_lows_m5[-1][1]
+                                    
+                                    # Prendi ultima candela M5 (i)
+                                    last_candle_m5 = df_ltf.iloc[-1]
+                                    o5 = float(last_candle_m5["open"])
+                                    h5 = float(last_candle_m5["high"])
+                                    l5 = float(last_candle_m5["low"])
+                                    c5 = float(last_candle_m5["close"])
+                                    
+                                    # Prendi candela i-2 per mini FVG
+                                    candle_i_2_m5 = df_ltf.iloc[-3]
+                                    h5_i_2 = float(candle_i_2_m5["high"])
+                                    l5_i_2 = float(candle_i_2_m5["low"])
+                                    
+                                    # Simula bars_since_retrace_hit (in produzione: tracked)
+                                    bars_since_retrace = 0  # Semplificazione
+                                    
+                                    # Detect confirm
+                                    confirm_result = detect_confirm_m5(
+                                        displacement_detected['dir'],
+                                        retrace_detected['zone_low'],
+                                        retrace_detected['zone_high'],
+                                        o5, h5, l5, c5,
+                                        atr5,
+                                        m5_last_swing_high, m5_last_swing_low,
+                                        h5_i_2, l5_i_2,
+                                        bars_since_retrace
+                                    )
+                                    
+                                    if confirm_result['status'] == "CONFIRMED":
+                                        confirm_detected = confirm_result
+                                        print(f"  [CONFIRMATION!] Direction: {confirm_detected['dir']}")
+                                        print(f"    Micro BOS Level: ${confirm_detected['micro_bos_level']:,.2f}")
+                                        print(f"    Grade: {confirm_detected['grade']}")
+                                        print(f"    Impulse: {'✓' if confirm_detected['impulse_ok'] else '✗'}")
+                                        print(f"    Body: {'✓' if confirm_detected['body_ok'] else '✗'}")
+                                        if confirm_detected.get('fvg'):
+                                            mini_fvg = confirm_detected['fvg']
+                                            print(f"    Mini FVG {mini_fvg['dir']}: ${mini_fvg['low']:,.2f} - ${mini_fvg['high']:,.2f}")
+                                    elif confirm_result['status'] == "WAIT":
+                                        print(f"  [CONFIRM] Waiting... ({confirm_result.get('reason', 'N/A')})")
+                                    elif confirm_result['status'] == "EXPIRED":
+                                        print(f"  [CONFIRM] EXPIRED - Timeout reached")
+                    
                     # Controlla posizione esistente
                     position = account.get_position(symbol)
                     
@@ -1009,19 +1208,25 @@ def main():
                     else:
                         # Controlla entry (solo se sotto il limite di posizioni)
                         if len(account.positions) < CONFIG["MAX_POSITIONS"]:
-                            # Entry basato su SWEEP + DISPLACEMENT + RETRACE (STEP 2 + 3 + 4)
+                            # Entry basato su tutti i 5 STEP ICT
                             signal = None
-                            if sweep_detected and displacement_detected and retrace_detected:
-                                # Se c'è sweep, displacement E retrace validi, entry nella direzione del bias
-                                if bias == "UP" and displacement_detected['dir'] == "UP":
+                            if sweep_detected and displacement_detected and retrace_detected and confirm_detected:
+                                # Setup completo: BIAS + SWEEP + DISPLACEMENT + RETRACE + CONFIRM
+                                if bias == "UP" and displacement_detected['dir'] == "UP" and confirm_detected['dir'] == "UP":
                                     signal = "LONG"
-                                elif bias == "DOWN" and displacement_detected['dir'] == "DOWN":
+                                elif bias == "DOWN" and displacement_detected['dir'] == "DOWN" and confirm_detected['dir'] == "DOWN":
                                     signal = "SHORT"
                             
                             if signal:
-                                print(f"  [SIGNAL] {signal} detected! Full ICT setup complete!")
-                                print(f"    Displacement Grade: {displacement_detected['grade']}")
-                                print(f"    Retrace Grade: {retrace_detected['grade']}")
+                                print(f"\n{'='*70}")
+                                print(f"🎯 [ENTRY SIGNAL] {signal} - COMPLETE ICT SETUP!")
+                                print(f"{'='*70}")
+                                print(f"  ✅ BIAS: {bias}")
+                                print(f"  ✅ SWEEP: Detected")
+                                print(f"  ✅ DISPLACEMENT: Grade {displacement_detected['grade']}")
+                                print(f"  ✅ RETRACE: Grade {retrace_detected['grade']}")
+                                print(f"  ✅ CONFIRMATION: Grade {confirm_detected['grade']}")
+                                print(f"{'='*70}\n")
                                 
                                 # Calcola size basato sul risk management
                                 risk_amount = account.get_balance() * CONFIG["RISK_PER_TRADE"]

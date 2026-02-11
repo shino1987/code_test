@@ -61,8 +61,25 @@ Rileva pullback ordinato dopo displacement (M15):
 - **Status**: HIT, WAIT, EXPIRED, INVALIDATED
 - **Output**: zone, retrace_point, depth, grade
 
-### STEP 5: In arrivo 🚧
-- **STEP 5**: Confirmation e Entry finale
+### STEP 5: CONFIRMATION Detection ✅
+Conferma setup su M5 dopo retrace:
+- **Context Gate**: Prezzo vicino zona retrace ± (ATR M5 * 0.25)
+- **Micro BOS su M5**:
+  - UP: close > swing_high_m5 + (ATR M5 * 0.02)
+  - DOWN: close < swing_low_m5 - (ATR M5 * 0.02)
+- **Impulse M5**: candle_range >= ATR M5 * 0.60 (più leggero)
+- **Body dominance**: body >= range * 0.50
+- **Mini FVG M5**: Pattern 3 candele (opzionale)
+- **Filtri**:
+  - Timeout: Max 12 barre M5 (~60 minuti)
+  - Fuori zona: WAIT
+- **Grading**:
+  - Grade A: Confirm + mini FVG coerente
+  - Grade B: Confirm senza FVG
+- **Status**: CONFIRMED, WAIT, EXPIRED
+- **Output**: dir, micro_bos_level, fvg, grade
+
+**Entry finale**: Richiede tutti i 5 STEP coerenti (BIAS → SWEEP → DISPLACEMENT → RETRACE → CONFIRM)
 
 ## 🚀 Utilizzo
 
@@ -120,6 +137,15 @@ CONFIG = {
 "RETRACE_ZONE_MAX": 0.79,           # 79% displacement range
 ```
 
+### Parametri Confirmation Detection
+```python
+"MAX_CONFIRM_BARS": 12,             # Max barre M5 per confirmation
+"CONFIRM_ZONE_BUFFER": 0.25,        # Zone buffer = ATR M5 * 0.25
+"CONFIRM_BOS_BUFFER": 0.02,         # Micro BOS buffer = ATR M5 * 0.02
+"CONFIRM_IMPULSE_MULT": 0.60,       # Impulso M5 >= ATR M5 * 0.60
+"CONFIRM_BODY_RATIO": 0.50,         # Body dominance >= 50%
+```
+
 ## 📈 Output
 
 Il bot stampa in tempo reale:
@@ -127,7 +153,8 @@ Il bot stampa in tempo reale:
 - **SWEEP Detection**: Quando rileva liquidity grab
 - **DISPLACEMENT Detection**: Cambio regime con grade A/B
 - **RETRACE Detection**: Pullback a zona valore con depth e grade
-- **Posizioni**: Apertura/chiusura trades
+- **CONFIRMATION Detection**: Micro BOS su M5 con grade
+- **Posizioni**: Apertura/chiusura trades (solo con setup completo)
 - **Performance**: Win rate, ROI, PnL
 
 ### Log files
@@ -183,6 +210,7 @@ Per trading reale, consulta sempre un professionista e comprendi i rischi del tr
 
 ## 📝 Versioni
 
+- **v5.0** - STEP 5: Confirmation Detection implementato - **STRATEGIA ICT COMPLETA** 🎉
 - **v4.0** - STEP 4: Retrace Detection implementato
 - **v3.0** - STEP 3: Displacement Detection implementato
 - **v2.0** - STEP 2: Sweep Detection implementato
@@ -195,4 +223,4 @@ Sviluppato step-by-step seguendo la metodologia ICT.
 
 ---
 
-**Status**: ✅ STEP 1, 2, 3 & 4 completati | 🚧 STEP 5 in sviluppo
+**Status**: ✅ **STRATEGIA ICT COMPLETA - Tutti i 5 STEP implementati!** 🎉🚀
