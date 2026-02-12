@@ -1343,6 +1343,7 @@ def detect_displacement_m15(bias: str, o: float, h: float, l: float, c: float,
     grade = "A" if (fvg is not None and fvg["dir"] == disp_dir) else "B"
     
     # === DISPLACEMENT VALIDO ===
+    # FIX Issue #5: Add disp_high and disp_low
     return {
         "dir": disp_dir,
         "bos_level": bos_level,
@@ -1351,7 +1352,9 @@ def detect_displacement_m15(bias: str, o: float, h: float, l: float, c: float,
         "candle_range": candle_range,
         "body": body,
         "fvg": fvg,
-        "grade": grade
+        "grade": grade,
+        "disp_high": h,
+        "disp_low": l
     }
 
 
@@ -1592,6 +1595,7 @@ def detect_confirm_m5(disp_dir: str, zone_low: float, zone_high: float,
     grade = "A" if (fvg is not None and fvg["dir"] == confirm_dir) else "B"
     
     # === CONFIRMATION VALIDA ===
+    # FIX Issue #6: Add confirm_high and confirm_low
     return {
         "status": "CONFIRMED",
         "dir": confirm_dir,
@@ -1599,7 +1603,9 @@ def detect_confirm_m5(disp_dir: str, zone_low: float, zone_high: float,
         "impulse_ok": impulse_ok,
         "body_ok": body_ok,
         "fvg": fvg,
-        "grade": grade
+        "grade": grade,
+        "confirm_high": h,
+        "confirm_low": l
     }
 
 
@@ -1824,18 +1830,20 @@ def main():
                             swing_highs, swing_lows = find_swing_highs_lows(df_htf, CONFIG["SWING_LEFT_RIGHT"])
                             
                             if swing_highs and swing_lows:
-                                last_swing_high = swing_highs[-1] if swing_highs else None
-                                last_swing_low = swing_lows[-1] if swing_lows else None
+                                # FIX Issue #4: Extract price from tuple
+                                last_swing_high = swing_highs[-1][1] if swing_highs else None
+                                last_swing_low = swing_lows[-1][1] if swing_lows else None
                                 
                                 # Get previous bar high/low per BOS
                                 if len(df_htf) >= 3:
                                     h_i_2 = float(df_htf["high"].iloc[-3])
                                     l_i_2 = float(df_htf["low"].iloc[-3])
                                     
+                                    # FIX Issue #3: Remove extra parameter
                                     displacement = detect_displacement_m15(
                                         state.bias, o, h, l, c, atr_htf,
                                         last_swing_high, last_swing_low,
-                                        h_i_2, l_i_2, current_bar_index
+                                        h_i_2, l_i_2
                                     )
                                     
                                     if displacement:
@@ -1934,8 +1942,9 @@ def main():
                         
                         # Swing highs/lows M5
                         m5_swing_highs, m5_swing_lows = find_swing_highs_lows(df_ltf, CONFIG["SWING_LEFT_RIGHT"])
-                        m5_swing_high = m5_swing_highs[-1] if m5_swing_highs else None
-                        m5_swing_low = m5_swing_lows[-1] if m5_swing_lows else None
+                        # FIX Issue #4: Extract price from tuple
+                        m5_swing_high = m5_swing_highs[-1][1] if m5_swing_highs else None
+                        m5_swing_low = m5_swing_lows[-1][1] if m5_swing_lows else None
                         
                         if len(df_ltf) >= 3 and m5_swing_high and m5_swing_low:
                             h5_i_2 = float(df_ltf["high"].iloc[-3])
@@ -1999,8 +2008,23 @@ def main():
                             sl_price = calculate_structural_sl(state, atr_htf)
                             tp_price = calculate_tp_from_risk(entry_price, sl_price, CONFIG.get("TP_RISK_MULTIPLE", 2.0))
                             
-                            # Open position
-                            success = account.open_position(symbol, signal, entry_price, sl_price, tp_price)
+                            # FIX Issue #1: Calculate size from risk
+                            risk_amount = account.balance * CONFIG["RISK_PER_TRADE"]
+                            risk_per_unit = abs(entry_price - sl_price)
+                            size = risk_amount / risk_per_unit if risk_per_unit > 0 else 0
+                            
+                            # Clamp to balance available (max 95%)
+                            max_size = (account.balance / entry_price * 0.95) if entry_price > 0 else 0
+                            size = min(size, max_size)
+                            
+                            # Respect min notional
+                            notional = size * entry_price
+                            min_notional = CONFIG.get("MIN_NOTIONAL_USDC", 10.0)
+                            if notional < min_notional:
+                                size = min_notional / entry_price if entry_price > 0 else 0
+                            
+                            # Open position with correct parameters
+                            success = account.open_position(symbol, signal, entry_price, size, sl_price, tp_price)
                             
                             if success:
                                 logger.info(f"[{symbol}] POSITION OPENED: {signal} @ {entry_price:.2f}")
