@@ -1655,77 +1655,9 @@ def generate_entry(disp_dir: str, confirm_high: float, confirm_low: float,
 
 
 # ===================== RISK MANAGEMENT (STRUCTURAL SL & 2R TP) =====================
-def calculate_structural_sl(side: str, sweep_extreme: float, 
-                            retrace_low: float, retrace_high: float,
-                            atr_m15: float) -> float:
-    """
-    Calcola Stop Loss strutturale basato su invalidazione mercato
-    
-    Parametri:
-    - side: "LONG" o "SHORT"
-    - sweep_extreme: prezzo estremo dello sweep
-    - retrace_low: low della zona retrace
-    - retrace_high: high della zona retrace
-    - atr_m15: ATR su M15
-    
-    Ritorna: Stop Loss price
-    
-    LOGICA SL STRUTTURALE:
-    - LONG: SL sotto il minimo tra sweep e retrace (con buffer ATR)
-    - SHORT: SL sopra il massimo tra sweep e retrace (con buffer ATR)
-    - SL è FISSO, non si muove mai
-    """
-    
-    sl_buffer = atr_m15 * CONFIG["SL_ATR_BUFFER"]
-    
-    if side == "LONG":
-        # LONG: SL = min(sweep_extreme, retrace_low) - buffer
-        sl_base = min(sweep_extreme, retrace_low)
-        stop_loss = sl_base - sl_buffer
-    elif side == "SHORT":
-        # SHORT: SL = max(sweep_extreme, retrace_high) + buffer
-        sl_base = max(sweep_extreme, retrace_high)
-        stop_loss = sl_base + sl_buffer
-    else:
-        raise ValueError(f"Side invalido: {side}")
-    
-    return stop_loss
-
-
-def calculate_tp_from_risk(side: str, entry_price: float, 
-                           stop_loss: float) -> float:
-    """
-    Calcola Take Profit basato su risk multiple (2R)
-    
-    Parametri:
-    - side: "LONG" o "SHORT"
-    - entry_price: prezzo di entry
-    - stop_loss: stop loss price
-    
-    Ritorna: Take Profit price
-    
-    LOGICA TP a 2R:
-    - R = distanza tra entry e SL
-    - TP = entry + (2 * R) per LONG
-    - TP = entry - (2 * R) per SHORT
-    """
-    
-    # Calcola R (risk)
-    risk = abs(entry_price - stop_loss)
-    
-    # Calcola TP basato su risk multiple
-    tp_multiple = CONFIG["TP_RISK_MULTIPLE"]
-    
-    if side == "LONG":
-        # LONG: TP sopra entry
-        take_profit = entry_price + (tp_multiple * risk)
-    elif side == "SHORT":
-        # SHORT: TP sotto entry
-        take_profit = entry_price - (tp_multiple * risk)
-    else:
-        raise ValueError(f"Side invalido: {side}")
-    
-    return take_profit
+# Note: calculate_structural_sl e calculate_tp_from_risk sono definite 
+# più avanti nel codice (lines ~2196-2217) con firma semplificata
+# Le versioni dettagliate sopra sono state rimosse per evitare duplicati
 
 
 def check_entry_signal(bias: str, df_ltf: pd.DataFrame) -> Optional[str]:
