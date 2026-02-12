@@ -1763,14 +1763,15 @@ def check_exit_signal(position: Dict, current_price: float) -> Optional[str]:
 
 # ===================== MAIN LOOP =====================
 def main():
-    """Loop principale del bot con STATE MACHINE"""
+    """Loop principale del bot"""
     print("="*70)
-    print("PAPER TRADING BOT - ICT MULTI-CANDELA STATE MACHINE")
+    print("PAPER TRADING BOT - ICT BIAS DETECTION SYSTEM")
     print("="*70)
     print(f"Capitale iniziale: ${CONFIG['INITIAL_CAPITAL']:,.2f}")
     print(f"Simboli: {', '.join(CONFIG['SYMBOLS'])}")
-    print(f"HTF (Steps 1-4): {CONFIG['HTF']} | LTF (Step 5): {CONFIG['LTF']}")
-    print(f"Strategia: ICT Multi-Candela con State Tracking")
+    print(f"HTF (BIAS): {CONFIG['HTF']} | LTF (ENTRY): {CONFIG['LTF']}")
+    print(f"Swing Detection: Fractal L/R={CONFIG['SWING_LEFT_RIGHT']}")
+    print(f"Strategia: ICT Liquidity + Structure + Compression")
     print("="*70)
     print()
     
@@ -1778,444 +1779,375 @@ def main():
     exchange = init_exchange()
     account = PaperAccount(CONFIG["INITIAL_CAPITAL"])
     
-    # CRITICAL: Inizializza State Manager (FUORI dal loop!)
-    state_manager = ICTStateManager()
-    
     loop_count = 0
-    last_status_print = time.time()
     
     try:
         while True:
             loop_count += 1
+            print(f"\n{'='*70}")
+            print(f"[LOOP {loop_count}] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"{'='*70}")
             
-            # CRITICAL: Increment ALL counters ogni iterazione
-            state_manager.increment_all_counters()
+            current_prices = {}
             
             # Analizza ogni simbolo
             for symbol in CONFIG["SYMBOLS"]:
                 try:
-                    # Get state per questo symbol
-                    state = state_manager.get_state(symbol)
+                    print(f"\n[{symbol}]")
                     
                     # Scarica dati HTF e LTF
                     df_htf = fetch_ohlcv(exchange, symbol, CONFIG["HTF"], limit=CONFIG["HTF_LOOKBACK"])
                     df_ltf = fetch_ohlcv(exchange, symbol, CONFIG["LTF"], limit=CONFIG["LTF_LOOKBACK"])
                     
                     if df_htf.empty or df_ltf.empty:
+                        print(f"  [SKIP] Dati insufficienti")
                         continue
                     
                     current_price = float(df_ltf["close"].iloc[-1])
+                    current_prices[symbol] = current_price
                     
-                    # Calcola ATR HTF (serve per quasi tutto)
-                    atr_htf_series = calculate_atr(df_htf, CONFIG["ATR_PERIOD"])
-                    atr_htf = float(atr_htf_series.iloc[-1]) if not pd.isna(atr_htf_series.iloc[-1]) else 0
+                    print(f"  Prezzo: ${current_price:,.2f}")
                     
-                    if atr_htf <= 0:
-                        continue
+                    # 1. COMPUTE BIAS su HTF
+                    bias_info = compute_bias(df_htf, CONFIG["SWING_LEFT_RIGHT"])
+                    bias = bias_info["bias"]
                     
-                    # ============ STATE MACHINE LOGIC ============
+                    print(f"  BIAS HTF: {bias} ({bias_info.get('reason', 'N/A')})")
                     
-                    if state.status == "WAIT_BIAS":
-                        # STEP 0: Cerca BIAS
-                        bias_info = compute_bias(df_htf, CONFIG["SWING_LEFT_RIGHT"])
-                        bias = bias_info.get("bias", "NONE")
+                    # Log dettagli bias
+                    pool_high = None
+                    pool_low = None
+                    if "external_high" in bias_info:
+                        pool_high = bias_info['external_high']
+                        pool_low = bias_info['external_low']
+                        print(f"    External High: ${pool_high:,.2f}")
+                        print(f"    External Low: ${pool_low:,.2f}")
+                    
+                    # 2. DETECT SWEEP su HTF (STEP 2)
+                    sweep_detected = None
+                    if bias != "NONE" and pool_high is not None and pool_low is not None:
+                        # Calcola ATR su HTF
+                        atr_htf = calculate_atr(df_htf, CONFIG["ATR_PERIOD"])
+                        current_atr = float(atr_htf.iloc[-1]) if not pd.isna(atr_htf.iloc[-1]) else 0
                         
-                        if bias != "NONE":
-                            # BIAS trovato!
-                            state.bias = bias
-                            state.bias_timestamp = datetime.now()
-                            state.transition("WAIT_SWEEP", f"BIAS {bias} detected")
-                            
-                            logger.info(f"[{symbol}] BIAS {bias} - {bias_info.get('reason', '')}")
-                    
-                    elif state.status == "WAIT_SWEEP":
-                        # STEP 1: Cerca SWEEP
-                        # bars_since_bias già incrementato automaticamente!
-                        
-                        # Timeout check
-                        max_bars = CONFIG.get("MAX_BARS_AFTER_BIAS", 20)
-                        if state.bars_since_bias > max_bars:
-                            state.reset("WAIT_BIAS", f"Timeout: no sweep in {state.bars_since_bias} bars")
-                            state_manager.stats["timeouts_today"] += 1
-                            continue
-                        
-                        # Get pools da bias
-                        bias_info = compute_bias(df_htf, CONFIG["SWING_LEFT_RIGHT"])
-                        pool_high = bias_info.get('external_high')
-                        pool_low = bias_info.get('external_low')
-                        
-                        if pool_high is not None and pool_low is not None:
-                            # Cerca sweep su ultima candela
+                        if current_atr > 0:
+                            # Prendi ultima candela HTF
                             last_candle = df_htf.iloc[-1]
                             o = float(last_candle["open"])
                             h = float(last_candle["high"])
                             l = float(last_candle["low"])
                             c = float(last_candle["close"])
                             
-                            sweep = detect_sweep(
-                                state.bias, pool_high, pool_low,
-                                o, h, l, c, atr_htf, current_price
+                            # Detect sweep
+                            sweep_detected = detect_sweep(
+                                bias, pool_high, pool_low,
+                                o, h, l, c, current_atr, current_price
                             )
                             
-                            if sweep:
-                                # SWEEP trovato!
-                                state.sweep_data = sweep
-                                state.sweep_bar_index = len(df_htf) - 1
-                                state.sweep_timestamp = datetime.now()
-                                state.transition("WAIT_DISPLACEMENT", f"SWEEP {sweep['direction']}")
-                                
-                                logger.info(f"[{symbol}] SWEEP detected at {sweep['pool']:.2f}")
+                            if sweep_detected:
+                                print(f"  [SWEEP DETECTED!] Direction: {sweep_detected['direction']}")
+                                print(f"    Pool: ${sweep_detected['pool']:,.2f}")
+                                print(f"    Extreme: ${sweep_detected['extreme']:,.2f}")
+                                print(f"    Wick Ratio: {sweep_detected['wick_ratio']:.2f}x")
+                                print(f"    Pool Distance: ${sweep_detected['pool_distance']:,.2f}")
                     
-                    elif state.status == "WAIT_DISPLACEMENT":
-                        # STEP 2: Cerca DISPLACEMENT
-                        # bars_since_sweep già incrementato!
+                    # 3. DETECT DISPLACEMENT su HTF (STEP 3)
+                    displacement_detected = None
+                    if sweep_detected and bias != "NONE" and pool_high is not None and pool_low is not None:
+                        # Dopo sweep, cerchiamo displacement nelle barre successive
+                        # Per semplicità, controlliamo l'ultima candela
+                        # (in futuro: loop sulle ultime N barre dopo sweep)
                         
-                        # Timeout check
-                        max_bars = CONFIG.get("MAX_BARS_AFTER_SWEEP", 6)
-                        if state.bars_since_sweep > max_bars:
-                            state.reset("WAIT_SWEEP", f"Timeout: no displacement in {state.bars_since_sweep} bars")
-                            state_manager.stats["timeouts_today"] += 1
-                            continue
-                        
-                        # Cerca displacement su ultima candela
-                        # (deve essere DOPO la candela di sweep!)
-                        current_bar_index = len(df_htf) - 1
-                        
-                        if current_bar_index > state.sweep_bar_index:
+                        if current_atr > 0 and len(df_htf) >= 3:
+                            # Prendi ultima candela HTF (i)
                             last_candle = df_htf.iloc[-1]
                             o = float(last_candle["open"])
                             h = float(last_candle["high"])
                             l = float(last_candle["low"])
                             c = float(last_candle["close"])
                             
-                            # Get swing highs/lows per BOS check
-                            swing_highs, swing_lows = find_swing_highs_lows(df_htf, CONFIG["SWING_LEFT_RIGHT"])
+                            # Prendi candela i-2 per FVG
+                            candle_i_2 = df_htf.iloc[-3]
+                            h_i_2 = float(candle_i_2["high"])
+                            l_i_2 = float(candle_i_2["low"])
                             
-                            if swing_highs and swing_lows:
-                                last_swing_high = swing_highs[-1] if swing_highs else None
-                                last_swing_low = swing_lows[-1] if swing_lows else None
+                            # Detect displacement
+                            displacement_detected = detect_displacement_m15(
+                                bias, o, h, l, c, current_atr,
+                                pool_high, pool_low,
+                                h_i_2, l_i_2
+                            )
+                            
+                            if displacement_detected:
+                                print(f"  [DISPLACEMENT DETECTED!] Direction: {displacement_detected['dir']}")
+                                print(f"    BOS Level: ${displacement_detected['bos_level']:,.2f}")
+                                print(f"    Grade: {displacement_detected['grade']}")
+                                print(f"    Impulse: {'✓' if displacement_detected['impulse_ok'] else '✗'}")
+                                print(f"    Body Dom: {'✓' if displacement_detected['body_ok'] else '✗'}")
+                                if displacement_detected['fvg']:
+                                    fvg = displacement_detected['fvg']
+                                    print(f"    FVG {fvg['dir']}: ${fvg['low']:,.2f} - ${fvg['high']:,.2f}")
+                    
+                    # 4. DETECT RETRACE su HTF (STEP 4)
+                    retrace_detected = None
+                    if displacement_detected:
+                        # Dopo displacement, cerchiamo retrace
+                        # Per semplicità, analizziamo le barre successive
+                        # In produzione: loop sulle barre dopo displacement con tracking
+                        
+                        # Usiamo la candela corrente per verificare retrace
+                        disp_dir = displacement_detected['dir']
+                        disp_fvg = displacement_detected.get('fvg')
+                        
+                        # Range displacement (usiamo la candela di displacement stessa)
+                        disp_high = h
+                        disp_low = l
+                        
+                        # Simula bars_since_disp (in produzione: tracked)
+                        bars_since_disp = 0  # Semplificazione: considera candela corrente
+                        
+                        # Detect retrace
+                        retrace_result = detect_retrace_m15(
+                            disp_dir, disp_fvg,
+                            disp_high, disp_low, current_atr,
+                            o, h, l, c,
+                            bars_since_disp
+                        )
+                        
+                        if retrace_result['status'] == "HIT":
+                            retrace_detected = retrace_result
+                            print(f"  [RETRACE HIT!] Grade: {retrace_detected['grade']}")
+                            print(f"    Zone: ${retrace_detected['zone_low']:,.2f} - ${retrace_detected['zone_high']:,.2f}")
+                            print(f"    Type: {retrace_detected['zone_type']}")
+                            print(f"    Point: ${retrace_detected['retrace_point']:,.2f}")
+                            print(f"    Depth: {retrace_detected['retrace_depth']:.2%}")
+                        elif retrace_result['status'] == "WAIT":
+                            print(f"  [RETRACE] Waiting for pullback to zone...")
+                        elif retrace_result['status'] == "EXPIRED":
+                            print(f"  [RETRACE] EXPIRED - Timeout reached")
+                        elif retrace_result['status'] == "INVALIDATED":
+                            print(f"  [RETRACE] INVALIDATED - Impulse broken")
+                    
+                    # 5. DETECT CONFIRM su LTF M5 (STEP 5)
+                    confirm_detected = None
+                    if retrace_detected:
+                        # Dopo retrace HIT, cerchiamo confirmation su M5 (LTF)
+                        # Usa df_ltf per analisi M5
+                        
+                        if len(df_ltf) >= 3:
+                            # Calcola ATR su M5
+                            atr_ltf = calculate_atr(df_ltf, CONFIG["ATR_PERIOD"])
+                            atr5 = float(atr_ltf.iloc[-1]) if not pd.isna(atr_ltf.iloc[-1]) else 0
+                            
+                            if atr5 > 0:
+                                # Trova swing su M5
+                                swing_highs_m5, swing_lows_m5 = find_swing_highs_lows(df_ltf, CONFIG["SWING_LEFT_RIGHT"])
                                 
-                                # Get previous bar high/low per BOS
-                                if len(df_htf) >= 3:
-                                    h_i_2 = float(df_htf["high"].iloc[-3])
-                                    l_i_2 = float(df_htf["low"].iloc[-3])
+                                if swing_highs_m5 and swing_lows_m5:
+                                    m5_last_swing_high = swing_highs_m5[-1][1]
+                                    m5_last_swing_low = swing_lows_m5[-1][1]
                                     
-                                    displacement = detect_displacement_m15(
-                                        state.bias, o, h, l, c, atr_htf,
-                                        last_swing_high, last_swing_low,
-                                        h_i_2, l_i_2, current_bar_index
+                                    # Prendi ultima candela M5 (i)
+                                    last_candle_m5 = df_ltf.iloc[-1]
+                                    o5 = float(last_candle_m5["open"])
+                                    h5 = float(last_candle_m5["high"])
+                                    l5 = float(last_candle_m5["low"])
+                                    c5 = float(last_candle_m5["close"])
+                                    
+                                    # Prendi candela i-2 per mini FVG
+                                    candle_i_2_m5 = df_ltf.iloc[-3]
+                                    h5_i_2 = float(candle_i_2_m5["high"])
+                                    l5_i_2 = float(candle_i_2_m5["low"])
+                                    
+                                    # Simula bars_since_retrace_hit (in produzione: tracked)
+                                    bars_since_retrace = 0  # Semplificazione
+                                    
+                                    # Detect confirm
+                                    confirm_result = detect_confirm_m5(
+                                        displacement_detected['dir'],
+                                        retrace_detected['zone_low'],
+                                        retrace_detected['zone_high'],
+                                        o5, h5, l5, c5,
+                                        atr5,
+                                        m5_last_swing_high, m5_last_swing_low,
+                                        h5_i_2, l5_i_2,
+                                        bars_since_retrace
                                     )
                                     
-                                    if displacement:
-                                        # DISPLACEMENT trovato!
-                                        state.displacement_data = displacement
-                                        state.displacement_bar_index = current_bar_index
-                                        state.displacement_timestamp = datetime.now()
-                                        state.last_displacement_high = displacement.get('disp_high', h)
-                                        state.last_displacement_low = displacement.get('disp_low', l)
-                                        state.transition("WAIT_RETRACE", f"DISPLACEMENT Grade {displacement['grade']}")
-                                        
-                                        logger.info(f"[{symbol}] DISPLACEMENT Grade {displacement['grade']}")
+                                    if confirm_result['status'] == "CONFIRMED":
+                                        confirm_detected = confirm_result
+                                        print(f"  [CONFIRMATION!] Direction: {confirm_detected['dir']}")
+                                        print(f"    Micro BOS Level: ${confirm_detected['micro_bos_level']:,.2f}")
+                                        print(f"    Grade: {confirm_detected['grade']}")
+                                        print(f"    Impulse: {'✓' if confirm_detected['impulse_ok'] else '✗'}")
+                                        print(f"    Body: {'✓' if confirm_detected['body_ok'] else '✗'}")
+                                        if confirm_detected.get('fvg'):
+                                            mini_fvg = confirm_detected['fvg']
+                                            print(f"    Mini FVG {mini_fvg['dir']}: ${mini_fvg['low']:,.2f} - ${mini_fvg['high']:,.2f}")
+                                    elif confirm_result['status'] == "WAIT":
+                                        print(f"  [CONFIRM] Waiting... ({confirm_result.get('reason', 'N/A')})")
+                                    elif confirm_result['status'] == "EXPIRED":
+                                        print(f"  [CONFIRM] EXPIRED - Timeout reached")
                     
-                    elif state.status == "WAIT_RETRACE":
-                        # STEP 3: Cerca RETRACE
-                        # bars_since_displacement già incrementato!
-                        
-                        # Timeout check
-                        max_bars = CONFIG.get("MAX_RETRACE_BARS", 8)
-                        if state.bars_since_displacement > max_bars:
-                            state.reset("WAIT_SWEEP", f"Timeout: no retrace in {state.bars_since_displacement} bars")
-                            state_manager.stats["timeouts_today"] += 1
-                            continue
-                        
-                        # Check invalidazione (prezzo oltre displacement)
-                        invalidation_buffer = atr_htf * CONFIG.get("RETRACE_INVALIDATION_MULT", 0.05)
-                        
-                        if state.bias == "UP":
-                            if current_price < (state.last_displacement_low - invalidation_buffer):
-                                state.reset("WAIT_BIAS", "Displacement invalidated (price below low)")
-                                state_manager.stats["invalidations_today"] += 1
-                                continue
-                        else:  # DOWN
-                            if current_price > (state.last_displacement_high + invalidation_buffer):
-                                state.reset("WAIT_BIAS", "Displacement invalidated (price above high)")
-                                state_manager.stats["invalidations_today"] += 1
-                                continue
-                        
-                        # Cerca retrace su ultima candela
-                        last_candle = df_htf.iloc[-1]
-                        o = float(last_candle["open"])
-                        h = float(last_candle["high"])
-                        l = float(last_candle["low"])
-                        c = float(last_candle["close"])
-                        
-                        # Get displacement data
-                        disp_dir = state.displacement_data.get('dir')
-                        disp_fvg = state.displacement_data.get('fvg')
-                        disp_high = state.displacement_data.get('disp_high', h)
-                        disp_low = state.displacement_data.get('disp_low', l)
-                        
-                        retrace = detect_retrace_m15(
-                            disp_dir, disp_fvg, disp_high, disp_low,
-                            atr_htf, o, h, l, c,
-                            state.bars_since_displacement  # CRITICAL: usato correttamente!
-                        )
-                        
-                        if retrace['status'] == "HIT":
-                            # RETRACE HIT!
-                            state.retrace_data = retrace
-                            state.retrace_bar_index = len(df_htf) - 1
-                            state.retrace_timestamp = datetime.now()
-                            state.transition("WAIT_CONFIRMATION", f"RETRACE HIT Grade {retrace['grade']}")
-                            
-                            logger.info(f"[{symbol}] RETRACE HIT Grade {retrace['grade']}")
-                        elif retrace['status'] == "INVALIDATED":
-                            state.reset("WAIT_BIAS", "Retrace invalidated")
-                            state_manager.stats["invalidations_today"] += 1
-                            continue
+                    # Controlla posizione esistente
+                    position = account.get_position(symbol)
                     
-                    elif state.status == "WAIT_CONFIRMATION":
-                        # STEP 4: Cerca CONFIRMATION su M5
-                        # bars_since_retrace già incrementato! (in barre M15)
-                        
-                        # Timeout check (converti da M15 a M5: 1 M15 = 3 M5)
-                        max_bars_m15 = CONFIG.get("MAX_CONFIRM_BARS_M15", 4)
-                        if state.bars_since_retrace > max_bars_m15:
-                            state.reset("WAIT_SWEEP", f"Timeout: no confirmation in {state.bars_since_retrace} bars M15")
-                            state_manager.stats["timeouts_today"] += 1
-                            continue
-                        
-                        # Cerca confirmation su M5
-                        last_candle_m5 = df_ltf.iloc[-1]
-                        o5 = float(last_candle_m5["open"])
-                        h5 = float(last_candle_m5["high"])
-                        l5 = float(last_candle_m5["low"])
-                        c5 = float(last_candle_m5["close"])
-                        
-                        # ATR M5
-                        atr_m5_series = calculate_atr(df_ltf, CONFIG["ATR_PERIOD"])
-                        atr_m5 = float(atr_m5_series.iloc[-1]) if not pd.isna(atr_m5_series.iloc[-1]) else atr_htf
-                        
-                        # Get retrace zone
-                        zone_low = state.retrace_data.get('zone_low', 0)
-                        zone_high = state.retrace_data.get('zone_high', 0)
-                        
-                        # Swing highs/lows M5
-                        m5_swing_highs, m5_swing_lows = find_swing_highs_lows(df_ltf, CONFIG["SWING_LEFT_RIGHT"])
-                        m5_swing_high = m5_swing_highs[-1] if m5_swing_highs else None
-                        m5_swing_low = m5_swing_lows[-1] if m5_swing_lows else None
-                        
-                        if len(df_ltf) >= 3 and m5_swing_high and m5_swing_low:
-                            h5_i_2 = float(df_ltf["high"].iloc[-3])
-                            l5_i_2 = float(df_ltf["low"].iloc[-3])
+                    if position:
+                        # Controlla exit
+                        exit_reason = check_exit_signal(position, current_price)
+                        if exit_reason:
+                            account.close_position(symbol, current_price, exit_reason)
+                    else:
+                        # Controlla entry (solo se sotto il limite di posizioni)
+                        if len(account.positions) < CONFIG["MAX_POSITIONS"]:
+                            # Entry basato su tutti i 5 STEP ICT + Entry Logic
+                            signal = None
+                            entry_data = None
                             
-                            confirmation = detect_confirm_m5(
-                                state.displacement_data.get('dir'),
-                                zone_low, zone_high,
-                                o5, h5, l5, c5, atr_m5,
-                                m5_swing_high, m5_swing_low,
-                                h5_i_2, l5_i_2,
-                                state.bars_since_retrace  # CRITICAL: usato correttamente!
-                            )
+                            if sweep_detected and displacement_detected and retrace_detected and confirm_detected:
+                                # Setup completo: BIAS + SWEEP + DISPLACEMENT + RETRACE + CONFIRM
+                                if bias == "UP" and displacement_detected['dir'] == "UP" and confirm_detected['dir'] == "UP":
+                                    # Genera entry logic per LONG
+                                    # Prendi high/low della candela di confirmation (ultima candela M5)
+                                    confirm_candle = df_ltf.iloc[-1]
+                                    confirm_h = float(confirm_candle["high"])
+                                    confirm_l = float(confirm_candle["low"])
+                                    
+                                    # Simula bars_since_confirm (in produzione: tracked)
+                                    bars_since_confirm = 0
+                                    
+                                    entry_data = generate_entry(
+                                        displacement_detected['dir'],
+                                        confirm_h,
+                                        confirm_l,
+                                        bars_since_confirm
+                                    )
+                                    
+                                    if entry_data['status'] == "READY":
+                                        signal = "LONG"
+                                    
+                                elif bias == "DOWN" and displacement_detected['dir'] == "DOWN" and confirm_detected['dir'] == "DOWN":
+                                    # Genera entry logic per SHORT
+                                    confirm_candle = df_ltf.iloc[-1]
+                                    confirm_h = float(confirm_candle["high"])
+                                    confirm_l = float(confirm_candle["low"])
+                                    
+                                    bars_since_confirm = 0
+                                    
+                                    entry_data = generate_entry(
+                                        displacement_detected['dir'],
+                                        confirm_h,
+                                        confirm_l,
+                                        bars_since_confirm
+                                    )
+                                    
+                                    if entry_data['status'] == "READY":
+                                        signal = "SHORT"
                             
-                            if confirmation['status'] == "CONFIRMED":
-                                # CONFIRMATION trovata!
-                                state.confirmation_data = confirmation
-                                state.confirmation_bar_index = len(df_ltf) - 1
-                                state.confirmation_timestamp = datetime.now()
-                                state.transition("SETUP_COMPLETE", f"CONFIRMATION Grade {confirmation['grade']}")
-                                
-                                logger.info(f"[{symbol}] CONFIRMATION Grade {confirmation['grade']}")
-                                state_manager.stats["setups_complete_today"] += 1
-                            elif confirmation['status'] == "EXPIRED":
-                                state.reset("WAIT_SWEEP", "Confirmation timeout")
-                                state_manager.stats["timeouts_today"] += 1
-                                continue
-                    
-                    elif state.status == "SETUP_COMPLETE":
-                        # STEP 5: ENTRY LOGIC
-                        # bars_since_confirmation già incrementato! (in barre M5 virtuali)
-                        
-                        # Timeout entry (6 barre M5 = 30 min)
-                        max_bars_entry = CONFIG.get("MAX_ENTRY_BARS_M5", 6)
-                        if state.bars_since_confirmation > max_bars_entry:
-                            state.reset("WAIT_SWEEP", "Entry timeout")
-                            state_manager.stats["timeouts_today"] += 1
-                            continue
-                        
-                        # Generate entry
-                        last_candle_m5 = df_ltf.iloc[-1]
-                        h5 = float(last_candle_m5["high"])
-                        l5 = float(last_candle_m5["low"])
-                        c5 = float(last_candle_m5["close"])
-                        
-                        confirm_high = state.confirmation_data.get('confirm_high', h5)
-                        confirm_low = state.confirmation_data.get('confirm_low', l5)
-                        
-                        entry = generate_entry(
-                            state.displacement_data.get('dir'),
-                            confirm_high, confirm_low,
-                            state.bars_since_confirmation  # CRITICAL: usato correttamente!
-                        )
-                        
-                        if entry['status'] == "READY":
-                            # ENTRY READY!
-                            signal = "LONG" if state.bias == "UP" else "SHORT"
-                            entry_price = entry['entry_price']
-                            
-                            # Calculate SL and TP
-                            sl_price = calculate_structural_sl(state, atr_htf)
-                            tp_price = calculate_tp_from_risk(entry_price, sl_price, CONFIG.get("TP_RISK_MULTIPLE", 2.0))
-                            
-                            # Open position
-                            success = account.open_position(symbol, signal, entry_price, sl_price, tp_price)
-                            
-                            if success:
-                                logger.info(f"[{symbol}] POSITION OPENED: {signal} @ {entry_price:.2f}")
+                            if signal and entry_data:
                                 print(f"\n{'='*70}")
-                                print(f"🎯 SETUP COMPLETO: {symbol} {signal}")
+                                print(f"🎯 [ENTRY SIGNAL] {signal} - COMPLETE ICT SETUP!")
                                 print(f"{'='*70}")
-                                print(f"Entry: ${entry_price:.2f}")
-                                print(f"Stop Loss: ${sl_price:.2f}")
-                                print(f"Take Profit: ${tp_price:.2f}")
-                                print(f"R:R: 1:{CONFIG.get('TP_RISK_MULTIPLE', 2.0):.1f}")
+                                print(f"  ✅ BIAS: {bias}")
+                                print(f"  ✅ SWEEP: Detected")
+                                print(f"  ✅ DISPLACEMENT: Grade {displacement_detected['grade']}")
+                                print(f"  ✅ RETRACE: Grade {retrace_detected['grade']}")
+                                print(f"  ✅ CONFIRMATION: Grade {confirm_detected['grade']}")
+                                print(f"  ✅ ENTRY PRICE: ${entry_data['entry_price']:,.2f}")
+                                print(f"     Confirm Range: ${entry_data['confirm_low']:,.2f} - ${entry_data['confirm_high']:,.2f}")
+                                print(f"     Entry @ 50% retrace of confirm candle")
                                 print(f"{'='*70}\n")
                                 
-                                # Reset per nuovo setup
-                                state.reset("WAIT_BIAS", "Position opened")
-                        
-                        elif entry['status'] == "EXPIRED":
-                            state.reset("WAIT_SWEEP", "Entry expired")
-                            state_manager.stats["timeouts_today"] += 1
-                            continue
-                    
-                    # Check exit per posizioni aperte
-                    position = account.get_position(symbol)
-                    if position:
-                        # Check SL/TP
-                        if position['side'] == "LONG":
-                            if current_price <= position['stop_loss']:
-                                account.close_position(symbol, current_price, "Stop Loss")
-                                logger.info(f"[{symbol}] Position closed: Stop Loss hit")
-                            elif current_price >= position['take_profit']:
-                                account.close_position(symbol, current_price, "Take Profit")
-                                logger.info(f"[{symbol}] Position closed: Take Profit hit")
-                        else:  # SHORT
-                            if current_price >= position['stop_loss']:
-                                account.close_position(symbol, current_price, "Stop Loss")
-                                logger.info(f"[{symbol}] Position closed: Stop Loss hit")
-                            elif current_price <= position['take_profit']:
-                                account.close_position(symbol, current_price, "Take Profit")
-                                logger.info(f"[{symbol}] Position closed: Take Profit hit")
+                                # Usa entry_price per la posizione
+                                entry_price = entry_data['entry_price']
+                                
+                                # Calcola SL strutturale
+                                sweep_extreme = sweep_detected['extreme']
+                                retrace_zone_low = retrace_detected['zone_low']
+                                retrace_zone_high = retrace_detected['zone_high']
+                                
+                                stop_loss = calculate_structural_sl(
+                                    signal,
+                                    sweep_extreme,
+                                    retrace_zone_low,
+                                    retrace_zone_high,
+                                    current_atr
+                                )
+                                
+                                # Calcola TP a 2R
+                                take_profit = calculate_tp_from_risk(
+                                    signal,
+                                    entry_price,
+                                    stop_loss
+                                )
+                                
+                                # Calcola position size basato su risk
+                                risk_amount = account.get_balance() * CONFIG["RISK_PER_TRADE"]
+                                risk_per_unit = abs(entry_price - stop_loss)
+                                position_size = risk_amount / risk_per_unit if risk_per_unit > 0 else 0
+                                
+                                # Log SL/TP details
+                                risk = abs(entry_price - stop_loss)
+                                reward = abs(take_profit - entry_price)
+                                rr_ratio = reward / risk if risk > 0 else 0
+                                
+                                print(f"  💰 RISK MANAGEMENT:")
+                                print(f"     Stop Loss: ${stop_loss:,.2f}")
+                                print(f"     Take Profit: ${take_profit:,.2f}")
+                                print(f"     Risk (R): ${risk:,.2f}")
+                                print(f"     Reward: ${reward:,.2f}")
+                                print(f"     R:R Ratio: 1:{rr_ratio:.2f}")
+                                print(f"     Position Size: {position_size:.6f} {symbol.split('/')[0]}\n")
+                                
+                                # Apri posizione
+                                account.open_position(
+                                    symbol, signal, entry_price,
+                                    position_size, stop_loss, take_profit
+                                )
                 
                 except Exception as e:
-                    logger.error(f"[{symbol}] Error: {e}", exc_info=True)
+                    print(f"[ERROR] Elaborazione {symbol}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
             
-            # Status table ogni 5 minuti
-            current_time = time.time()
-            if current_time - last_status_print >= 300:  # 5 minuti
-                print_status_table(state_manager, account)
-                last_status_print = current_time
+            # Aggiorna equity
+            account.update_equity(current_prices)
             
-            # Sleep
-            time.sleep(CONFIG.get("LOOP_INTERVAL", 60))
-        
+            # Stampa stato account
+            print(f"\n{'='*70}")
+            print(f"ACCOUNT STATUS:")
+            print(f"  Balance: ${account.get_balance():,.2f}")
+            print(f"  Equity: ${account.get_equity():,.2f}")
+            print(f"  Posizioni aperte: {len(account.positions)}")
+            
+            stats = account.get_statistics()
+            if stats["total_trades"] > 0:
+                print(f"\nSTATISTICHE:")
+                print(f"  Trades totali: {stats['total_trades']}")
+                print(f"  Win Rate: {stats['win_rate']:.2f}%")
+                print(f"  PnL totale: ${stats['total_pnl']:,.2f}")
+                print(f"  ROI: {stats.get('roi', 0.0):+.2f}%")
+            
+            print(f"{'='*70}")
+            
+            # Attendi prossimo loop
+            time.sleep(CONFIG["LOOP_INTERVAL"])
+    
     except KeyboardInterrupt:
-        print("\n\n⏹️  Bot interrotto dall'utente")
+        print("\n\n[STOP] Bot fermato dall'utente")
+        print(f"\n{'='*70}")
+        print("REPORT FINALE")
+        print(f"{'='*70}")
         
-        # Report finale
-        print_final_report(account, state_manager)
-    
-    except Exception as e:
-        logger.error(f"Fatal error in main loop: {e}", exc_info=True)
-        print(f"\n❌ Errore fatale: {e}")
-    
-    finally:
-        # Cleanup
-        logger.info("Bot terminato")
-
-
-def print_status_table(state_manager: ICTStateManager, account: PaperAccount) -> None:
-    """Stampa tabella status di tutte le coppie"""
-    print("\n" + "="*80)
-    print(f"📊 STATUS UPDATE - {datetime.now().strftime('%H:%M:%S')}")
-    print("="*80)
-    
-    summary = state_manager.get_summary()
-    hot_setups = state_manager.get_hot_setups()
-    
-    for symbol, info in summary.items():
-        status_emoji = ""
-        if symbol in hot_setups:
-            status_emoji = "⚡"
-        
-        print(f"{symbol:12} {info['status']:20} (BIAS: {info['bias']:4}) {info['age']:15} {status_emoji}")
-    
-    print("="*80)
-    print(f"⚡ Hot Setups: {len(hot_setups)} | Today: {state_manager.stats['setups_complete_today']} complete, "
-          f"{state_manager.stats['timeouts_today']} timeouts, {state_manager.stats['invalidations_today']} invalidations")
-    
-    # Account status
-    stats = account.get_statistics()
-    print(f"💰 Balance: ${account.equity:.2f} | P&L: ${stats['total_pnl']:+.2f} | ROI: {stats.get('roi', 0.0):+.2f}%")
-    print("="*80 + "\n")
-
-
-def print_final_report(account: PaperAccount, state_manager: ICTStateManager) -> None:
-    """Report finale alla chiusura"""
-    print("\n" + "="*80)
-    print("📋 REPORT FINALE")
-    print("="*80)
-    
-    stats = account.get_statistics()
-    
-    print(f"Capitale iniziale: ${CONFIG['INITIAL_CAPITAL']:,.2f}")
-    print(f"Capitale finale: ${account.equity:,.2f}")
-    print(f"P&L Totale: ${stats['total_pnl']:+,.2f}")
-    print(f"ROI: {stats.get('roi', 0.0):+.2f}%")
-    print()
-    print(f"Trade totali: {stats['total_trades']}")
-    print(f"Win: {stats['winning_trades']} | Loss: {stats['losing_trades']}")
-    print(f"Win Rate: {stats['win_rate']:.1f}%")
-    print(f"P&L medio: ${stats['avg_pnl']:+.2f}")
-    print()
-    print(f"Setup completati oggi: {state_manager.stats['setups_complete_today']}")
-    print(f"Timeout oggi: {state_manager.stats['timeouts_today']}")
-    print(f"Invalidazioni oggi: {state_manager.stats['invalidations_today']}")
-    print("="*80)
-    
-    # Export Excel
-    try:
-        export_to_excel(account, ict_logger)
-        print("\n✅ Report Excel esportato con successo")
-    except Exception as e:
-        print(f"\n⚠️ Errore export Excel: {e}")
-
-
-def calculate_structural_sl(state: ICTSetupState, atr: float) -> float:
-    """Calcola SL strutturale basato su displacement/retrace"""
-    if state.bias == "UP":
-        # SL sotto displacement low
-        sl = state.last_displacement_low - (atr * CONFIG.get("SL_ATR_BUFFER", 0.05))
-    else:
-        # SL sopra displacement high
-        sl = state.last_displacement_high + (atr * CONFIG.get("SL_ATR_BUFFER", 0.05))
-    
-    return sl
-
-
-def calculate_tp_from_risk(entry: float, sl: float, risk_multiple: float) -> float:
-    """Calcola TP basato su risk multiple"""
-    risk = abs(entry - sl)
-    
-    if entry > sl:  # LONG
-        tp = entry + (risk * risk_multiple)
-    else:  # SHORT
-        tp = entry - (risk * risk_multiple)
-    
-    return tp
-
+        stats = account.get_statistics()
+        print(f"Capitale iniziale: ${account.initial_capital:,.2f}")
+        print(f"Capitale finale: ${account.get_equity():,.2f}")
+        print(f"PnL totale: ${stats['total_pnl']:,.2f}")
+        print(f"ROI: {stats.get('roi', 0.0):+.2f}%")
+        print(f"Trades totali: {stats['total_trades']}")
+        print(f"Win Rate: {stats['win_rate']:.2f}%")
+        print(f"{'='*70}")
 
 
 if __name__ == "__main__":
