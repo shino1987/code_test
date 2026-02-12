@@ -1247,7 +1247,7 @@ def detect_sweep(bias: str, pool_high: float, pool_low: float,
         "extreme": extreme,
         "close": c,
         "atr": atr,
-        "wick_ratio": wick_down / body if direction == "DOWN" else wick_up / body,
+        "wick_ratio": (wick_down / body if body != 0 else 999) if direction == "DOWN" else (wick_up / body if body != 0 else 999),
         "pool_distance": pool_distance,
     }
 
