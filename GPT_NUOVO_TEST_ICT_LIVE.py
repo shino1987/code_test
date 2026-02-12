@@ -942,6 +942,529 @@ def test_mock_order_flow(
         logger.log_event('ERROR', f"Mock test failed: {e}")
         return False
 
+# ===================== BINANCE-SPECIFIC FUNCTIONS =====================
+
+def get_binance_filters(exchange: ccxt.binance, symbol: str) -> Tuple[float, float, float, Optional[int]]:
+    """
+    Get Binance market filters for a symbol
+    
+    Returns:
+        Tuple of (step_size, min_qty, min_notional, quote_asset_precision)
+    """
+    m = exchange.markets.get(symbol)
+    if not m:
+        return 0.0, 0.0, 0.0, None
+    
+    info = m.get("info", {}) or {}
+    filters = info.get("filters", []) or []
+    
+    step = 0.0
+    min_qty = 0.0
+    min_notional = 0.0
+    quote_asset_prec = info.get("quoteAssetPrecision")
+    
+    for f in filters:
+        ft = f.get("filterType")
+        if ft == "LOT_SIZE":
+            step = float(f.get("stepSize", 0.0) or 0.0)
+            min_qty = float(f.get("minQty", 0.0) or 0.0)
+        if ft in ("MIN_NOTIONAL", "NOTIONAL"):
+            mn = f.get("minNotional") or f.get("notional")
+            if mn is not None:
+                min_notional = float(mn)
+    
+    return step, min_qty, min_notional, quote_asset_prec
+
+def decimals_from_step(step: float) -> int:
+    """Calculate decimal places from step size"""
+    if not step or step <= 0:
+        return 8
+    s = f"{step:.20f}".rstrip("0")
+    return len(s.split(".")[1]) if "." in s else 0
+
+def quantize_down_str(value: float, decimals: int) -> str:
+    """Quantize value to specified decimal places, rounding down"""
+    d = Decimal(str(value))
+    q = Decimal("1e-" + str(decimals))
+    return format(d.quantize(q, rounding=ROUND_DOWN), "f")
+
+def format_quantity(exchange: ccxt.binance, symbol: str, qty: float) -> str:
+    """Format quantity according to exchange filters"""
+    step, min_qty, _, _ = get_binance_filters(exchange, symbol)
+    if qty <= 0:
+        return "0"
+    
+    if step and step > 0:
+        q = math.floor(qty / step) * step
+    else:
+        q = qty
+    
+    if min_qty and q < min_qty:
+        q = min_qty
+    
+    dec = decimals_from_step(step) if step and step > 0 else 8
+    return quantize_down_str(q, dec)
+
+def format_quote(exchange: ccxt.binance, symbol: str, quote: float, min_notional_pad: float = 1.05) -> str:
+    """Format quote quantity according to exchange filters"""
+    _, _, min_notional, quote_prec = get_binance_filters(exchange, symbol)
+    q = float(quote)
+    
+    if min_notional and q < min_notional:
+        q = float(min_notional) * min_notional_pad
+    
+    dec = int(quote_prec) if quote_prec is not None else 6
+    return quantize_down_str(q, dec)
+
+def calculate_amount_from_usdc(
+    exchange: ccxt.binance,
+    symbol: str,
+    usdc_target: float,
+    ref_price: float,
+    min_notional_pad: float = 1.05
+) -> float:
+    """Calculate base asset amount from USDC target"""
+    step, min_qty, min_notional, _ = get_binance_filters(exchange, symbol)
+    
+    target = float(usdc_target)
+    if min_notional and target < min_notional:
+        target = min_notional * min_notional_pad
+    
+    amt = target / max(ref_price, 1e-12)
+    
+    if step and step > 0:
+        amt = math.floor(amt / step) * step
+    
+    if min_qty and amt < min_qty:
+        amt = min_qty
+    
+    return float(amt)
+
+# ===================== ADVANCED TRADING FUNCTIONS =====================
+
+def avg_range(df: pd.DataFrame, n: int) -> float:
+    """Calculate average range of candles"""
+    rng = (df["high"].astype(float) - df["low"].astype(float)).tail(n)
+    return float(rng.mean()) if len(rng) else 0.0
+
+def ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculate Exponential Moving Average"""
+    return series.ewm(span=span, adjust=False).mean()
+
+def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    """Calculate Average True Range"""
+    h = df["high"].astype(float)
+    l = df["low"].astype(float)
+    c = df["close"].astype(float)
+    prev_c = c.shift(1)
+    tr = pd.concat([(h - l), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    return tr.rolling(n).mean()
+
+def get_bias(df_bias: pd.DataFrame, swing_lr: int = 2) -> str:
+    """
+    Get bias from timeframe using BOS and CHoCH logic
+    
+    Returns:
+        "UP", "DOWN", or "NONE"
+    """
+    sh, sl = find_swings(df_bias, lr=swing_lr)
+    trend = detect_trend(sh, sl)
+    
+    if trend == "NONE" or len(sh) < 2 or len(sl) < 2:
+        return "NONE"
+    
+    last_close = float(df_bias["close"].astype(float).iloc[-1])
+    prev_sh = float(sh[-2][1])
+    prev_sl = float(sl[-2][1])
+    
+    if trend == "UP":
+        if last_close > prev_sh:
+            return "UP"  # BOS
+        if last_close < prev_sl:
+            return "DOWN"  # CHoCH
+        return "NONE"
+    
+    if trend == "DOWN":
+        if last_close < prev_sl:
+            return "DOWN"  # BOS
+        if last_close > prev_sh:
+            return "UP"  # CHoCH
+        return "NONE"
+    
+    return "NONE"
+
+def latest_entry_swings(df_entry: pd.DataFrame, swing_lr: int = 2) -> Optional[Dict[str, float]]:
+    """Get latest swing highs and lows from entry timeframe"""
+    sh, sl = find_swings(df_entry, lr=swing_lr)
+    if not sh or not sl:
+        return None
+    return {"swing_high": float(sh[-1][1]), "swing_low": float(sl[-1][1])}
+
+def detect_bullish_fvg(df: pd.DataFrame, idx: int, min_size_pct: float = 0.00010) -> Optional[Dict[str, float]]:
+    """Detect bullish Fair Value Gap"""
+    if idx < 2:
+        return None
+    c1 = candle_stats(df.iloc[idx-2])
+    c3 = candle_stats(df.iloc[idx])
+    bot = c1["h"]
+    top = c3["l"]
+    if bot < top:
+        mid = float(df.iloc[idx]["close"])
+        if (top - bot) / max(mid, 1e-12) >= min_size_pct:
+            return {"low": bot, "high": top}
+    return None
+
+def detect_bearish_fvg(df: pd.DataFrame, idx: int, min_size_pct: float = 0.00010) -> Optional[Dict[str, float]]:
+    """Detect bearish Fair Value Gap"""
+    if idx < 2:
+        return None
+    c1 = candle_stats(df.iloc[idx-2])
+    c3 = candle_stats(df.iloc[idx])
+    low = c3["h"]
+    high = c1["l"]
+    if low < high:
+        mid = float(df.iloc[idx]["close"])
+        if (high - low) / max(mid, 1e-12) >= min_size_pct:
+            return {"low": low, "high": high}
+    return None
+
+def find_order_block(df: pd.DataFrame, disp_idx: int, side: str, lookback: int = 6) -> Optional[Dict]:
+    """Find order block before displacement candle"""
+    start = max(0, disp_idx - lookback)
+    for j in range(disp_idx - 1, start - 1, -1):
+        c = candle_stats(df.iloc[j])
+        if side == "LONG" and c["bear"]:
+            return {"low": c["l"], "high": c["h"], "idx": j}
+        if side == "SHORT" and c["bull"]:
+            return {"low": c["l"], "high": c["h"], "idx": j}
+    return None
+
+def zone_touched(candle: Dict, zone: Dict) -> bool:
+    """Check if candle touches a zone"""
+    return (candle["h"] >= zone["low"]) and (candle["l"] <= zone["high"])
+
+# ===================== POSITION MANAGEMENT =====================
+
+class PositionManager:
+    """Manage open positions and pending setups"""
+    
+    def __init__(
+        self,
+        client: BinanceMarginClient,
+        config: TradingConfig,
+        logger: TradingLogger,
+        telegram: TelegramNotifier
+    ):
+        self.client = client
+        self.config = config
+        self.logger = logger
+        self.telegram = telegram
+        self.positions: Dict[str, Position] = {}
+        self.pending: Dict[str, PendingSetup] = {}
+        self.trade_records: List[TradeRecord] = []
+    
+    def open_position(
+        self,
+        symbol: str,
+        side: str,
+        entry_ref: float,
+        sl_price: float,
+        sl_type: str,
+        tp_price: float,
+        note: str = ""
+    ) -> bool:
+        """
+        Open a new position
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        if len(self.positions) >= self.config.max_open_positions:
+            self.logger.log_event(
+                'WARNING',
+                f"Max positions reached",
+                symbol=symbol,
+                max_positions=self.config.max_open_positions
+            )
+            return False
+        
+        real_entry = float(entry_ref)
+        amount = None
+        entry_order_id = None
+        
+        # Calculate tp_pct for TP ladder
+        tp_pct = abs((float(tp_price) - float(entry_ref)) / max(float(entry_ref), 1e-12))
+        
+        if self.config.live_trading:
+            try:
+                # Place entry order
+                order, filled_qty = self._place_entry_market(symbol, side, float(entry_ref))
+                amount = float(filled_qty)
+                entry_order_id = order.get("orderId") or order.get("id")
+                
+                # Calculate real entry from filled order
+                exec_qty = float(order.get("executedQty", 0.0) or 0.0)
+                cum_quote = float(order.get("cummulativeQuoteQty", 0.0) or 0.0)
+                if exec_qty > 0 and cum_quote > 0:
+                    real_entry = cum_quote / exec_qty
+                
+                # Recalculate TP and SL based on real entry
+                if side == "LONG":
+                    tp_price = real_entry * (1 + tp_pct)
+                else:
+                    tp_price = real_entry * (1 - tp_pct)
+                
+                sl_pct = (float(sl_price) - float(entry_ref)) / float(entry_ref)
+                sl_price = real_entry * (1.0 + sl_pct)
+                
+                self.logger.log_event(
+                    'INFO',
+                    "LIVE ENTRY OK",
+                    symbol=symbol,
+                    side=side,
+                    order_id=entry_order_id,
+                    executed_qty=order.get('executedQty'),
+                    real_entry=real_entry,
+                    tp=tp_price,
+                    sl=sl_price,
+                    sl_type=sl_type
+                )
+                
+            except Exception as e:
+                self.logger.log_event('ERROR', f"Entry failed: {e}", symbol=symbol, side=side)
+                return False
+        
+        # Create position
+        position = Position(
+            symbol=symbol,
+            side=side,
+            entry=float(real_entry),
+            sl=float(sl_price),
+            sl_type=str(sl_type),
+            tp=float(tp_price),
+            tp_pct=float(tp_pct),
+            note=note,
+            amount=float(amount) if amount else None,
+            entry_order_id=entry_order_id,
+            entry_time=datetime.now()
+        )
+        
+        self.positions[symbol] = position
+        
+        # Calculate percentages for message
+        sl_pct_abs = abs((float(real_entry) - float(sl_price)) / max(float(real_entry), 1e-12)) * 100.0
+        tp_pct_abs = abs((float(tp_price) - float(real_entry)) / max(float(real_entry), 1e-12)) * 100.0
+        
+        # Log to trade records
+        trade_record = TradeRecord(
+            symbol=symbol,
+            side=side,
+            entry_time=datetime.now(),
+            entry_price=float(real_entry),
+            entry_order_id=entry_order_id,
+            sl_price=float(sl_price),
+            tp_price=float(tp_price),
+            sl_type=str(sl_type),
+            amount=float(amount) if amount else 0.0,
+            note=note
+        )
+        
+        self.logger.log_trade_open(trade_record)
+        
+        # Send Telegram notification
+        self.telegram.send(
+            f"🟢 OPEN {side} {symbol}\n{note}\n"
+            f"Entry {real_entry:.6f} (ref {float(entry_ref):.6f})\n"
+            f"TP {float(tp_price):.6f} ({tp_pct_abs:.2f}%)\n"
+            f"SL {float(sl_price):.6f} ({sl_pct_abs:.2f}%) | {sl_type}\n"
+            f"Size target {self.config.trade_usdc_target} USDC"
+        )
+        
+        return True
+    
+    def close_position(
+        self,
+        symbol: str,
+        exit_price: float,
+        reason: str
+    ) -> bool:
+        """
+        Close an existing position
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        if symbol not in self.positions:
+            self.logger.log_event('WARNING', f"Position not found", symbol=symbol)
+            return False
+        
+        pos = self.positions[symbol]
+        side = pos.side
+        tracked_amt = float(pos.amount or 0.0)
+        
+        if self.config.live_trading:
+            try:
+                if side == "LONG":
+                    # For LONG, close by selling base asset
+                    real_base_free = self._get_cross_base_free(symbol)
+                    qty_to_close = min(real_base_free, tracked_amt) if tracked_amt > 0 else real_base_free
+                    
+                    if qty_to_close > 0:
+                        resp = self._place_close_market(symbol, side, qty_to_close)
+                        self.logger.log_event(
+                            'INFO',
+                            "LIVE CLOSE OK",
+                            symbol=symbol,
+                            side=side,
+                            order_id=resp.get('orderId'),
+                            executed_qty=resp.get('executedQty')
+                        )
+                    else:
+                        self.logger.log_event(
+                            'WARNING',
+                            "Position already closed (base=0)",
+                            symbol=symbol
+                        )
+                        del self.positions[symbol]
+                        return True
+                
+                else:  # SHORT
+                    if tracked_amt <= 0:
+                        self.logger.log_event('WARNING', f"Missing amount for SHORT", symbol=symbol)
+                        return False
+                    resp = self._place_close_market(symbol, side, tracked_amt)
+                    self.logger.log_event(
+                        'INFO',
+                        "LIVE CLOSE OK",
+                        symbol=symbol,
+                        side=side,
+                        order_id=resp.get('orderId'),
+                        executed_qty=resp.get('executedQty')
+                    )
+                
+            except Exception as e:
+                self.logger.log_event('ERROR', f"Close failed: {e}", symbol=symbol, side=side)
+                return False
+        
+        # Calculate PnL
+        entry = float(pos.entry)
+        if side == "LONG":
+            pnl_gross = (exit_price - entry) / entry
+        else:
+            pnl_gross = (entry - exit_price) / entry
+        
+        pnl_net_est = pnl_gross - self.config.round_trip_fee_pct
+        
+        # Update trade record
+        trade_record = TradeRecord(
+            symbol=symbol,
+            side=side,
+            entry_time=pos.entry_time or datetime.now(),
+            entry_price=float(pos.entry),
+            entry_order_id=pos.entry_order_id,
+            exit_time=datetime.now(),
+            exit_price=float(exit_price),
+            sl_price=float(pos.sl),
+            tp_price=float(pos.tp),
+            sl_type=pos.sl_type,
+            amount=float(pos.amount or 0.0),
+            pnl_gross_pct=float(pnl_gross * 100),
+            pnl_net_pct=float(pnl_net_est * 100),
+            grade="WIN" if pnl_net_est > 0 else "LOSS",
+            note=pos.note,
+            close_reason=reason
+        )
+        
+        self.logger.log_trade_close(trade_record)
+        
+        # Send Telegram notification
+        self.telegram.send(
+            f"🔴 CLOSE {symbol} ({reason})\n"
+            f"PNL gross {pnl_gross*100:.2f}% | net(est) {pnl_net_est*100:.2f}%\n"
+            f"SL_TYPE: {pos.sl_type}"
+        )
+        
+        del self.positions[symbol]
+        return True
+    
+    def _place_entry_market(self, symbol: str, side: str, ref_price: float) -> Tuple[Dict, float]:
+        """Place entry market order"""
+        bsym = self.client.to_binance_symbol(symbol)
+        
+        if side == "LONG":
+            params = {
+                "symbol": bsym,
+                "side": "BUY",
+                "type": "MARKET",
+                "sideEffectType": "MARGIN_BUY",
+                "quoteOrderQty": format_quote(
+                    self.client.exchange,
+                    symbol,
+                    float(self.config.trade_usdc_target),
+                    self.config.min_notional_pad
+                ),
+                "timestamp": self.client.exchange.milliseconds(),
+                "recvWindow": 60000,
+            }
+            order = self.client.exchange.sapiPostMarginOrder(params)
+            filled_qty = float(order.get("executedQty") or 0.0)
+            return order, filled_qty
+        
+        else:  # SHORT
+            amount = calculate_amount_from_usdc(
+                self.client.exchange,
+                symbol,
+                float(self.config.trade_usdc_target),
+                ref_price,
+                self.config.min_notional_pad
+            )
+            params = {
+                "symbol": bsym,
+                "side": "SELL",
+                "type": "MARKET",
+                "quantity": format_quantity(self.client.exchange, symbol, amount),
+                "sideEffectType": "AUTO_BORROW_REPAY",
+                "timestamp": self.client.exchange.milliseconds(),
+                "recvWindow": 60000,
+            }
+            order = self.client.exchange.sapiPostMarginOrder(params)
+            filled_qty = float(order.get("executedQty") or amount)
+            return order, filled_qty
+    
+    def _place_close_market(self, symbol: str, side: str, amount: float) -> Dict:
+        """Place close market order"""
+        bsym = self.client.to_binance_symbol(symbol)
+        if amount <= 0:
+            raise Exception("amount<=0 in close")
+        
+        params = {
+            "symbol": bsym,
+            "type": "MARKET",
+            "quantity": format_quantity(self.client.exchange, symbol, float(amount)),
+            "sideEffectType": "AUTO_REPAY",
+            "timestamp": self.client.exchange.milliseconds(),
+            "recvWindow": 60000,
+        }
+        params["side"] = "SELL" if side == "LONG" else "BUY"
+        return self.client.exchange.sapiPostMarginOrder(params)
+    
+    def _get_cross_base_free(self, symbol: str) -> float:
+        """Get free base asset balance from cross margin account"""
+        base = symbol.split("/")[0].strip().upper()
+        try:
+            data = self.client.exchange.sapiGetMarginAccount({
+                "timestamp": self.client.exchange.milliseconds(),
+                "recvWindow": 60000
+            })
+            assets = data.get("userAssets") or []
+            for a in assets:
+                if (a.get("asset") or "").upper() == base:
+                    return float(a.get("free", 0.0) or 0.0)
+            return 0.0
+        except Exception as e:
+            self.logger.log_event('WARNING', f"Cannot fetch cross margin balance: {e}", symbol=symbol)
+            return 0.0
+
 # ===================== MAIN TRADING LOGIC =====================
 
 def main():
@@ -978,9 +1501,10 @@ def main():
         symbols=len(config.symbols)
     )
     
-    # Trading state
-    positions: Dict[str, Position] = {}
-    pending: Dict[str, PendingSetup] = {}
+    # Initialize position manager
+    position_mgr = PositionManager(client, config, logger, telegram)
+    
+    # Trading loop counter
     loop_count = 0
     
     # Main trading loop
@@ -996,17 +1520,65 @@ def main():
                     'INFO',
                     "Heartbeat",
                     loop=loop_count,
-                    open_positions=len(positions),
-                    pending_setups=len(pending)
+                    open_positions=len(position_mgr.positions),
+                    pending_setups=len(position_mgr.pending)
                 )
             
-            # TODO: Implement full trading logic here
-            # This would include:
-            # 1. Fetch data for all symbols
-            # 2. Analyze bias (30m)
-            # 3. Detect ICTR setups (sweep, displacement, retrace, confirm)
-            # 4. Manage existing positions (TP ladder, SL)
-            # 5. Handle errors and retries
+            # 1. Check existing positions (SL/TP management)
+            for symbol in list(position_mgr.positions.keys()):
+                try:
+                    pos = position_mgr.positions[symbol]
+                    
+                    # Fetch current candle
+                    df = client.fetch_ohlcv(symbol, config.entry_tf, 2)
+                    if df.empty:
+                        continue
+                    
+                    last_candle = df.iloc[-1]
+                    high = float(last_candle["high"])
+                    low = float(last_candle["low"])
+                    close = float(last_candle["close"])
+                    
+                    # Check SL hit
+                    if pos.side == "LONG":
+                        if low <= pos.sl:
+                            position_mgr.close_position(symbol, pos.sl, "SL_HIT")
+                            continue
+                    else:  # SHORT
+                        if high >= pos.sl:
+                            position_mgr.close_position(symbol, pos.sl, "SL_HIT")
+                            continue
+                    
+                    # Check TP hit (basic - no ladder in this simplified version)
+                    if pos.side == "LONG":
+                        if high >= pos.tp:
+                            position_mgr.close_position(symbol, pos.tp, "TP_HIT")
+                            continue
+                    else:  # SHORT
+                        if low <= pos.tp:
+                            position_mgr.close_position(symbol, pos.tp, "TP_HIT")
+                            continue
+                    
+                except Exception as e:
+                    logger.log_event('ERROR', f"Error managing position: {e}", symbol=symbol)
+            
+            # 2. Scan for new setups (simplified version)
+            # In a full implementation, this would include:
+            # - Fetch bias from 30m timeframe
+            # - Detect sweep/displacement/retrace/confirm on 5m
+            # - Apply BTC filters
+            # - Check room to TP
+            # - Calculate structural SL
+            # - Open positions
+            
+            # For now, just log that we're scanning
+            if loop_count % config.heartbeat_every_loops == 0:
+                logger.log_event(
+                    'DEBUG',
+                    "Scanning for new setups",
+                    active_symbols=len(config.symbols),
+                    open_positions=len(position_mgr.positions)
+                )
             
             time.sleep(config.loop_sec)
             
