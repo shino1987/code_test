@@ -1,0 +1,98 @@
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│          📁 DOVE VENGONO SALVATI I FILE?                       │
+│             WHERE ARE FILES SAVED?                              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+🇮🇹 ITALIANO:
+
+1. Il file CSV è salvato NELLA STESSA CARTELLA del bot
+2. Nome file: ict_trades.csv
+3. Esempio:
+   
+   Se il bot è qui:     C:\Users\Marco\bot\ict_bot_minimal.py
+   Il CSV sarà qui:     C:\Users\Marco\bot\ict_trades.csv
+
+Come trovarlo:
+   Windows → Apri la cartella del bot → Cerca "ict_trades.csv"
+   Linux/Mac → Usa comando: ls ict_trades.csv
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🇬🇧 ENGLISH:
+
+1. CSV file is saved in the SAME FOLDER as the bot
+2. File name: ict_trades.csv
+3. Example:
+   
+   If bot is at:        C:\Users\John\bot\ict_bot_minimal.py
+   CSV will be at:      C:\Users\John\bot\ict_trades.csv
+
+How to find it:
+   Windows → Open bot folder → Look for "ict_trades.csv"
+   Linux/Mac → Use command: ls ict_trades.csv
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📂 STRUTTURA FILE / FILE STRUCTURE:
+
+your_folder/
+├── ict_bot_minimal.py      ← Bot principale / Main bot
+├── ict_trades.csv          ← FILE SALVATO QUI! / SAVED HERE!
+├── requirements.txt
+└── README.md
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔍 COMANDI RAPIDI / QUICK COMMANDS:
+
+Windows (Command Prompt):
+   cd path\to\bot         ← Vai alla cartella / Go to folder
+   dir ict_trades.csv     ← Mostra file / Show file
+   type ict_trades.csv    ← Visualizza contenuto / View content
+
+Linux/Mac (Terminal):
+   cd /path/to/bot        ← Vai alla cartella / Go to folder
+   ls ict_trades.csv      ← Mostra file / Show file
+   cat ict_trades.csv     ← Visualizza contenuto / View content
+   pwd                    ← Mostra percorso / Show path
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📊 APRIRE IL FILE / OPEN THE FILE:
+
+Excel:
+   1. Apri Excel / Open Excel
+   2. File → Apri / File → Open
+   3. Seleziona ict_trades.csv
+
+Google Sheets:
+   1. Vai su sheets.google.com
+   2. File → Importa / File → Import
+   3. Carica ict_trades.csv / Upload ict_trades.csv
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+❓ DOMANDE FREQUENTI / FAQ:
+
+Q: Non trovo il file / Can't find the file
+A: Il file viene creato dopo il primo trade
+   The file is created after the first trade
+
+Q: Il file è vuoto / File is empty
+A: Normale, contiene solo intestazioni fino al primo trade
+   Normal, contains only headers until first trade
+
+Q: Dove è la cartella del bot? / Where is the bot folder?
+A: Dove hai scaricato/estratto i file del bot
+   Where you downloaded/extracted the bot files
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📖 DOCUMENTAZIONE COMPLETA / FULL DOCUMENTATION:
+
+Per maggiori dettagli / For more details:
+👉 Leggi / Read: FILE_LOCATIONS.md
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
