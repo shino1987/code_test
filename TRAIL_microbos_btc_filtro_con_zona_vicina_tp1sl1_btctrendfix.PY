@@ -33,6 +33,10 @@ from decimal import Decimal, ROUND_DOWN, getcontext
 getcontext().prec = 28
 
 # ===================== CONFIG =====================
+# TIMEFRAMES: Usiamo 3 timeframe diversi per scopi diversi
+# - BIAS_TF (30m): determina la direzione generale del mercato (LONG/SHORT)
+# - ENTRY_TF (5m): trova il punto di ingresso preciso nel trade
+# - SL_TF (15m): calcola lo Stop Loss strutturale (più robusto del 5m)
 BIAS_TF = "30m"
 ENTRY_TF = "5m"
 SL_TF = "15m"            # <<< SL strutturale su 15 minuti
@@ -40,9 +44,11 @@ LOOP_SEC = 25
 
 MAX_OPEN_POS = 3
 
-LOOKBACK_BIAS = 260
-LOOKBACK_ENTRY = 320
-LOOKBACK_SL = 220        # abbastanza per swing 15m
+# LOOKBACK: Profondità storica diversa per ogni timeframe
+# Ogni timeframe richiede una diversa quantità di candele storiche
+LOOKBACK_BIAS = 260      # 260 candele da 30m (~5 giorni) per bias
+LOOKBACK_ENTRY = 320     # 320 candele da 5m (~1 giorno) per entry
+LOOKBACK_SL = 220        # 220 candele da 15m (~2 giorni) per swing SL
 
 MIN_STRUCT_SL_PCT = 0.0035  # 0.35%
 
@@ -51,29 +57,34 @@ TP_AFTER_LAST_STEP = 0.0025  # +0.25% fisso
 
 
 # ===== BTC CONFLICT FILTER (OB 15m con 2 rifiuti) =====
+# FILTRO 1: Cerca Order Block generici su BTC con rifiuti recenti (30 ore)
+# Evita trade se BTC è vicino a zone con almeno 2 rifiuti nelle ultime 30h
 BTC_SYMBOL = "BTC/USDC"
 BTC_TF = "15m"
-BTC_LOOKBACK = 260
+BTC_LOOKBACK = 260       # 260 candele da 15m per trovare OB generali
 
-BTC_NEAR_PCT = 0.0040        # 0.40%
-BTC_REJ_MIN = 2              # almeno 2 rifiuti
-BTC_REJ_LOOKBACK = 120       # ~30 ore
+BTC_NEAR_PCT = 0.0040        # 0.40% distanza per considerare "vicino" a zona
+BTC_REJ_MIN = 2              # almeno 2 rifiuti per considerarla zona attiva
+BTC_REJ_LOOKBACK = 120       # ~30 ore - periodo per contare rifiuti
 BTC_REJ_COOLDOWN = 4         # 4x15m = 1h, evita doppio conteggio
 
 
 # ===== BTC REJECTION ZONES (15m, >= 4 giorni) =====
+# FILTRO 2: Identifica zone di prezzo specifiche con rifiuti multipli (4 giorni)
+# Zone dove BTC è stato rifiutato più volte in un periodo più lungo
+# DIFFERENZA da CONFLICT FILTER: analisi più profonda (4 gg vs 30h) e cluster specifici
 BTC_ZONE_TF = "15m"
 BTC_ZONE_DAYS = 4
-BTC_ZONE_LOOKBACK = BTC_ZONE_DAYS * 24 * 4   # 384
+BTC_ZONE_LOOKBACK = BTC_ZONE_DAYS * 24 * 4   # 384 candele = 4 giorni completi
 
-BTC_ZONE_CLUSTER_PCT = 0.0020    # 0.20%
-BTC_ZONE_NEAR_PCT    = 0.0040    # 0.40%
-BTC_ZONE_MIN_REJ     = 2         # minimo 2 rifiuti
+BTC_ZONE_CLUSTER_PCT = 0.0020    # 0.20% per raggruppare swing in una zona
+BTC_ZONE_NEAR_PCT    = 0.0040    # 0.40% distanza da zona per trigger
+BTC_ZONE_MIN_REJ     = 2         # minimo 2 rifiuti nella zona
 
-BTC_ZONE_REJECT_WINDOW   = 8      # 2 ore
-BTC_ZONE_REJECT_MOVE_PCT = 0.0150 # 1.50%
+BTC_ZONE_REJECT_WINDOW   = 8      # 2 ore - finestra per identificare rifiuto
+BTC_ZONE_REJECT_MOVE_PCT = 0.0150 # 1.50% movimento minimo per rifiuto valido
 
-BTC_ZONE_BREAK_PCT = 0.0010      # 0.10%
+BTC_ZONE_BREAK_PCT = 0.0010      # 0.10% rottura per considerare zona "broken"
 
 # ===== BTC TREND FILTER (15m) =====
 BTC_TREND_LR = 2   # fractal LR per capire trend BTC su 15m (indipendente da SWING_LR_SL)
@@ -93,9 +104,9 @@ TRADES_CSV_PATH = "trades_log.csv"
 
 
 # ===== TARGETS =====
-TP_GROSS_PCT = 0.0120            # TP0 iniziale = +1.20%
-SL_CAP_PCT = 0.0065              # CAP massimo SL: -0.65%
-SL_FIXED_PCT = 0.0100   # SL fisso 1.00%
+TP_GROSS_PCT = 0.0120            # TP0 iniziale = +1.20% (target profit lordo)
+SL_CAP_PCT = 0.0065              # CAP massimo SL: -0.65% (limite per protezione)
+SL_FIXED_PCT = 0.0100            # SL fisso 1.00% (quando non c'è struttura valida)
 
 
 # (opzionale) fee stimata SOLO per report/telegram, non per logica di prezzo
@@ -110,10 +121,12 @@ LIVE_TRADING = True
 TRADE_USDC_TARGET = 200.0
 MIN_NOTIONAL_PAD = 1.05
 
-# Swings (fractal)
-SWING_LR_BIAS = 2
-SWING_LR_ENTRY = 2
-SWING_LR_SL = 2
+# Swings (fractal) - LR separati per ogni timeframe
+# Anche se tutti usano LR=2, sono separati perché operano su TF diversi
+# e potrebbero essere configurati diversamente in futuro
+SWING_LR_BIAS = 2    # Per swing su BIAS_TF (30m)
+SWING_LR_ENTRY = 2   # Per swing su ENTRY_TF (5m)
+SWING_LR_SL = 2      # Per swing su SL_TF (15m) - usato per Stop Loss strutturale
 
 # Sweep
 SWEEP_BUFFER_PCT = 0.00025
