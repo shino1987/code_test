@@ -36,6 +36,7 @@ getcontext().prec = 28
 BIAS_TF = "30m"
 ENTRY_TF = "5m"
 SL_TF = "15m"            # <<< SL strutturale su 15 minuti
+LTF = "5m"               # <<< LTF (Lower Time Frame) for confirmation
 LOOP_SEC = 25
 
 MAX_OPEN_POS = 3
@@ -43,6 +44,7 @@ MAX_OPEN_POS = 3
 LOOKBACK_BIAS = 260
 LOOKBACK_ENTRY = 320
 LOOKBACK_SL = 220        # abbastanza per swing 15m
+LOOKBACK_LTF = 320       # lookback for M5 confirmation
 
 MIN_STRUCT_SL_PCT = 0.0035  # 0.35%
 
@@ -114,6 +116,7 @@ MIN_NOTIONAL_PAD = 1.05
 SWING_LR_BIAS = 2
 SWING_LR_ENTRY = 2
 SWING_LR_SL = 2
+SWING_LR_M5 = 2          # Swing LR for M5/LTF confirmation
 
 # Sweep
 SWEEP_BUFFER_PCT = 0.00025
@@ -129,6 +132,13 @@ FVG_MIN_SIZE_PCT = 0.00010
 
 # Buffer strutturale SL (piccolo margine oltre swing/OB)
 STRUCT_SL_BUFFER_PCT = 0.00020  # 0.02%
+
+# Confirm configuration (M5)
+MAX_CONFIRM_BARS = 12            # Max bars M5 for confirm (≈60 min)
+ZONE_BUFFER_ATR_MULT = 0.25      # 25% ATR buffer for zone proximity
+MICRO_BOS_BUFFER_ATR_MULT = 0.02 # 2% ATR for micro BOS
+CONFIRM_IMPULSE_MULT = 0.60      # Range must be >= 0.6 ATR
+CONFIRM_BODY_RATIO = 0.50        # Body must be >= 50% of range
 
 pending = {}
 positions = {}
@@ -735,6 +745,98 @@ def find_order_block(df: pd.DataFrame, disp_idx: int, side: str):
 
 def zone_touched(candle, zone):
     return (candle["h"] >= zone["low"]) and (candle["l"] <= zone["high"])
+
+def detect_confirm_m5(disp_dir: str, zone_low: float, zone_high: float,
+                      o: float, h: float, l: float, c: float,
+                      atr5: float,
+                      m5_last_swing_high: float, m5_last_swing_low: float,
+                      h_i_2: float, l_i_2: float,
+                      bars_since_retrace_hit: int) -> dict:
+    """
+    Detect confirmation on M5 (LTF) after M15 retrace
+    
+    Requirements:
+    - Must be in or near retrace zone (context gate)
+    - Micro BOS (Break Of Structure) on M5
+    - Impulse anomaly (range >= 0.6 ATR)
+    - Body dominance (body >= 50% range)
+    - Optional: mini FVG M5 = grade A, else grade B
+    
+    Returns:
+        dict: Confirmation result with structure:
+            - status (str): "CONFIRMED", "WAIT", or "EXPIRED"
+            - dir (str): "UP" or "DOWN" (only if CONFIRMED)
+            - micro_bos_level (float): BOS level (only if CONFIRMED)
+            - impulse_ok (bool): Impulse check result (only if CONFIRMED)
+            - body_ok (bool): Body dominance check result (only if CONFIRMED)
+            - fvg (dict or None): FVG info with 'dir', 'low', 'high' (only if CONFIRMED)
+            - grade (str): "A" or "B" (only if CONFIRMED)
+    """
+    # Time decay check
+    if bars_since_retrace_hit > MAX_CONFIRM_BARS:
+        return {"status": "EXPIRED"}  # Reset to WAIT_SWEEP
+    
+    # Context gate: must be in or near zone
+    zone_buffer = atr5 * ZONE_BUFFER_ATR_MULT
+    in_zone_or_near = (l <= zone_high + zone_buffer) and (h >= zone_low - zone_buffer)
+    
+    if not in_zone_or_near:
+        return {"status": "WAIT"}  # Stay in WAIT_CONFIRM
+    
+    # Thresholds
+    bos_buffer5 = atr5 * MICRO_BOS_BUFFER_ATR_MULT
+    
+    candle_range = h - l
+    if candle_range <= 0:
+        return {"status": "WAIT"}
+    
+    body = abs(c - o)
+    
+    # Impulse check
+    impulse_ok = candle_range >= atr5 * CONFIRM_IMPULSE_MULT
+    
+    # Body dominance
+    body_ok = body >= candle_range * CONFIRM_BODY_RATIO
+    
+    # Micro BOS check
+    micro_bos_up = c > (m5_last_swing_high + bos_buffer5)
+    micro_bos_down = c < (m5_last_swing_low - bos_buffer5)
+    
+    # Micro FVG check (3-candle rule)
+    fvg = None
+    if l > h_i_2:  # Bullish FVG
+        fvg = {"dir": "UP", "low": h_i_2, "high": l}
+    elif h < l_i_2:  # Bearish FVG
+        fvg = {"dir": "DOWN", "low": h, "high": l_i_2}
+    
+    # Validate based on displacement direction
+    if disp_dir == "UP":
+        valid = in_zone_or_near and micro_bos_up and impulse_ok and body_ok
+        confirm_dir = "UP"
+        bos_level = m5_last_swing_high
+    elif disp_dir == "DOWN":
+        valid = in_zone_or_near and micro_bos_down and impulse_ok and body_ok
+        confirm_dir = "DOWN"
+        bos_level = m5_last_swing_low
+    else:
+        return {"status": "WAIT"}
+    
+    if not valid:
+        return {"status": "WAIT"}
+    
+    # Grade: A if FVG present and aligned, else B
+    grade = "A" if (fvg is not None and fvg["dir"] == confirm_dir) else "B"
+    
+    return {
+        "status": "CONFIRMED",
+        "dir": confirm_dir,
+        "micro_bos_level": bos_level,
+        "impulse_ok": impulse_ok,
+        "body_ok": body_ok,
+        "fvg": fvg,
+        "grade": grade,
+    }
+
 
 def _count_ob_rejections(df15: pd.DataFrame, ob: dict, kind: str,
                          lookback: int, cooldown: int) -> int:
@@ -1360,6 +1462,7 @@ while True:
                     p["state"] = "WAIT_RETRACE"
                     p["fvg"] = fvg
                     p["ob"] = ob
+                    p["displacement_dir"] = "UP" if side == "LONG" else "DOWN"
 
                 # WAIT_RETRACE
                 elif p["state"] == "WAIT_RETRACE":
@@ -1379,11 +1482,134 @@ while True:
                         reasons["no_retrace_touch"] += 1
                         continue
 
+                    # Fetch LTF to track bar index for confirmation timeout
+                    df_ltf_init = fetch_df(symbol, LTF, LOOKBACK_LTF)
+                    if not df_ltf_init.empty and len(df_ltf_init) >= 50:
+                        df_ltf_closed_init = df_ltf_init.iloc[:-1].copy()
+                        p["retrace_hit_bar_index"] = len(df_ltf_closed_init) - 1
+                    else:
+                        p["retrace_hit_bar_index"] = 0
+
                     p["state"] = "WAIT_CONFIRM"
                     p["touch_name"], p["touch_zone"] = touched
+                    p["bars_since_retrace_hit"] = 0
 
                 # WAIT_CONFIRM
                 elif p["state"] == "WAIT_CONFIRM":
+                    # Check bias coherence - if bias changes, reset
+                    if (side == "LONG" and bias != "UP") or (side == "SHORT" and bias != "DOWN"):
+                        if DEBUG_TERMINAL:
+                            print(f"[{symbol}] BIAS changed from {side} to {bias}, reset to WAIT_SWEEP", flush=True)
+                        pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                        continue
+
+                    z = p.get("touch_zone")
+                    if not z:
+                        reasons["confirm_missing_zone"] += 1
+                        pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                        continue
+
+                    disp_dir = p.get("displacement_dir", "UP" if side == "LONG" else "DOWN")
+
+                    # Fetch LTF (M5) data
+                    df_ltf = fetch_df(symbol, LTF, LOOKBACK_LTF)
+                    if df_ltf.empty or len(df_ltf) < 50:
+                        reasons["ltf_fetch_empty"] += 1
+                        continue
+
+                    df_ltf_closed = df_ltf.iloc[:-1].copy()
+
+                    # Get M5 swings for micro structure
+                    sh_m5, sl_m5 = find_swings(df_ltf_closed, lr=SWING_LR_M5)
+
+                    if len(sh_m5) < 1 or len(sl_m5) < 1:
+                        reasons["no_swings_ltf"] += 1
+                        continue
+
+                    m5_last_swing_high = float(sh_m5[-1][1])
+                    m5_last_swing_low = float(sl_m5[-1][1])
+
+                    # Update bars since retrace hit
+                    retrace_hit_bar_index = p.get("retrace_hit_bar_index")
+                    if retrace_hit_bar_index is None:
+                        # Corrupted state - missing retrace_hit_bar_index
+                        if DEBUG_TERMINAL:
+                            print(f"[{symbol}] Missing retrace_hit_bar_index, reset to WAIT_SWEEP", flush=True)
+                        pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+                        continue
+                    
+                    p["bars_since_retrace_hit"] = len(df_ltf_closed) - 1 - retrace_hit_bar_index
+
+                    # Get current M5 candle
+                    last_m5 = candle_stats(df_ltf.iloc[-1])
+                    o_m5 = last_m5["o"]
+                    h_m5 = last_m5["h"]
+                    l_m5 = last_m5["l"]
+                    c_m5 = last_m5["c"]
+
+                    # Get i-2 candle for FVG detection (need at least 3 candles)
+                    if len(df_ltf) >= 3:
+                        candle_i_2 = candle_stats(df_ltf.iloc[-3])
+                        h_i_2 = candle_i_2["h"]
+                        l_i_2 = candle_i_2["l"]
+                    else:
+                        h_i_2 = h_m5
+                        l_i_2 = l_m5
+
+                    # Calculate ATR M5
+                    atr_series = atr(df_ltf_closed, 14)
+                    if atr_series.isna().iloc[-1]:
+                        reasons["no_atr_m5"] += 1
+                        continue
+                    atr5 = float(atr_series.iloc[-1])
+
+                    # Detect confirm
+                    confirm = detect_confirm_m5(
+                        disp_dir=disp_dir,
+                        zone_low=float(z["low"]),
+                        zone_high=float(z["high"]),
+                        o=o_m5,
+                        h=h_m5,
+                        l=l_m5,
+                        c=c_m5,
+                        atr5=atr5,
+                        m5_last_swing_high=m5_last_swing_high,
+                        m5_last_swing_low=m5_last_swing_low,
+                        h_i_2=h_i_2,
+                        l_i_2=l_i_2,
+                        bars_since_retrace_hit=p["bars_since_retrace_hit"]
+                    )
+
+                    status = confirm.get("status")
+
+                    if status == "CONFIRMED":
+                        p["state"] = "VALID_SETUP"
+                        p["confirm"] = confirm
+                        if DEBUG_TERMINAL:
+                            fvg_info = "NO miniFVG"
+                            fvg = confirm.get('fvg')
+                            if fvg and isinstance(fvg, dict) and 'dir' in fvg and 'low' in fvg and 'high' in fvg:
+                                fvg_info = f"miniFVG {fvg['dir']} [{fvg['low']:.6f}-{fvg['high']:.6f}]"
+                            print(
+                                f"[{symbol}] CONFIRM DETECTED! "
+                                f"dir={confirm['dir']} grade={confirm['grade']} "
+                                f"micro_BOS_level={confirm['micro_bos_level']:.6f} "
+                                f"{fvg_info} "
+                                f"→ VALID_SETUP",
+                                flush=True
+                            )
+
+                    elif status == "EXPIRED":
+                        if DEBUG_TERMINAL:
+                            print(f"[{symbol}] CONFIRM EXPIRED (>{MAX_CONFIRM_BARS} bars) → reset to WAIT_SWEEP", flush=True)
+                        pending[symbol] = {"state": "WAIT_SWEEP", "side": side}
+
+                    elif status == "WAIT":
+                        # Stay in WAIT_CONFIRM
+                        pass
+
+                # VALID_SETUP (placeholder - will handle entry in next step)
+                elif p["state"] == "VALID_SETUP":
                     z = p.get("touch_zone")
                     if not z:
                         reasons["confirm_missing_zone"] += 1
