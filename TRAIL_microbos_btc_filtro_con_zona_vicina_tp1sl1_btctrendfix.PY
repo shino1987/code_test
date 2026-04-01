@@ -139,6 +139,28 @@ HEARTBEAT_EVERY_LOOPS = 3
 PRINT_PENDING_SAMPLE = 8
 loop_count = 0
 
+# ===================== ENV VALIDATION =====================
+# Validate required environment variables at startup
+required_env_vars = {
+    "BINANCE_API_KEY": "Binance API key",
+    "BINANCE_API_SECRET": "Binance API secret",
+}
+
+missing_vars = []
+for var_name, var_desc in required_env_vars.items():
+    if not os.getenv(var_name):
+        missing_vars.append(f"{var_name} ({var_desc})")
+
+if missing_vars:
+    print("=" * 60, flush=True)
+    print("ERRORE: Variabili d'ambiente mancanti:", flush=True)
+    for var in missing_vars:
+        print(f"  - {var}", flush=True)
+    print("=" * 60, flush=True)
+    raise SystemExit(1)
+
+print("✓ Variabili d'ambiente validate", flush=True)
+
 # ===================== TELEGRAM =====================
 TG_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
@@ -222,6 +244,22 @@ def fetch_df(symbol: str, tf: str, limit: int) -> pd.DataFrame:
 
 # ===================== HELPERS =====================
 def find_swings(df: pd.DataFrame, lr: int = 2):
+    """
+    Find swing highs and lows in price data.
+    
+    Args:
+        df: DataFrame with OHLC data
+        lr: Look-back/look-forward range for swing detection
+    
+    Returns:
+        tuple: (swing_highs, swing_lows) as lists of (index, price) tuples
+    """
+    # Validate DataFrame has enough data
+    # Need at least lr candles before + lr candles after + 1 center candle
+    min_required_rows = (2 * lr) + 1
+    if df.empty or len(df) < min_required_rows:
+        return [], []
+    
     highs = df["high"].astype(float).values
     lows = df["low"].astype(float).values
     swing_highs = []
@@ -855,7 +893,29 @@ def _find_last_displacement_idx_15m(df15: pd.DataFrame, side: str) -> int:
     return -1
 
 def structural_sl_from_last_ob_15m(entry: float, side: str, df15: pd.DataFrame):
+    """
+    Calculate structural stop-loss based on last order block on 15m timeframe.
+    
+    Args:
+        entry: Entry price for the trade
+        side: "LONG" or "SHORT"
+        df15: 15-minute timeframe DataFrame
+    
+    Returns:
+        tuple: (sl_price, sl_type) where:
+            - sl_price: Stop loss price level, or None if cannot be calculated
+            - sl_type: Type of SL ("STRUCT_15M" or "CAP_0.65%"), or None if cannot be calculated
+    """
+    # Validate inputs
+    if df15.empty:
+        print(f"[SL] Warning: Empty DataFrame for SL calculation", flush=True)
+        return None, None
+    
     entry = float(entry)
+    if entry <= 0:
+        print(f"[SL] Warning: Invalid entry price {entry}", flush=True)
+        return None, None
+    
     buf = entry * STRUCT_SL_BUFFER_PCT
 
     disp_idx = _find_last_displacement_idx_15m(df15, side)
@@ -1151,6 +1211,12 @@ def open_position(symbol, side, entry_ref, sl_price, sl_type, tp_price, note="")
         try:
             order, filled_qty = place_entry_market(symbol, side, float(entry_ref))
             amount = float(filled_qty)
+            
+            # Validate order was filled
+            if amount <= 0:
+                print(f"[{symbol}] ENTRY FAILED: Order not filled (executedQty={amount})", flush=True)
+                return
+            
             entry_order_id = order.get("orderId") or order.get("id")
             real_entry = get_real_entry_from_sapi_order(order, float(entry_ref))
 
